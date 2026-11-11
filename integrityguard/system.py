@@ -6,9 +6,12 @@
 from __future__ import annotations
 
 import json
+import hashlib
+import math
 import os
 import shutil
 import time
+import uuid
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -16,8 +19,10 @@ import torch
 
 from .collect import fingerprint, load_control, load_package, sign_package
 from .features import BehaviorProbe, extract, hash_baseline
+from .evidence import EvidenceStore
 from .model import collate, load_detector
 from .spec import CLASS_RU, CLASSES, LEVELS, layers_of
+from .threat_intel import lookup_pypi_dependencies
 
 ALLOW, REVIEW, BLOCK = "ALLOW", "REVIEW", "BLOCK"
 EXIT_CODE = {ALLOW: 0, BLOCK: 1, REVIEW: 2}
@@ -67,15 +72,22 @@ PLAYBOOK = {
 
 
 class IntegrityGuard:
-    def __init__(self, registry, model_path, key: bytes | None = None):
+    def __init__(self, registry, model_path, key: bytes | None = None, public_intel_enabled=True):
         self.registry = Path(registry)
         self.registry.mkdir(parents=True, exist_ok=True)
+        self.model_path = Path(model_path).resolve()
         self.model, ck = load_detector(model_path)
         self.threshold, self.block_threshold = ck["threshold"], ck["block_threshold"]
+        self.model_sha256 = EvidenceStore.sha256_file(self.model_path)
+        self.evidence = EvidenceStore(self.registry / "evidence.sqlite")
+        self.evidence.register_model(self.model_sha256, self.model_path, ck)
+        self.evidence.backfill_jsonl(self.registry / "events.jsonl",
+                                     self.registry / "events.archive.jsonl")
         keyfile = self.registry / "signing.key"
         self.key = key or (os.environ["IG_SIGNING_KEY"].encode() if "IG_SIGNING_KEY" in os.environ
                            else keyfile.read_bytes() if keyfile.exists() else None)
         self._probes: dict = {}
+        self.public_intel_enabled = bool(public_intel_enabled)
 
     # ---------------------------------------------------------------- эталоны
     def _base(self, name) -> Path:
@@ -133,21 +145,102 @@ class IntegrityGuard:
         p = self.registry / "trusted_index.json"
         return json.loads(p.read_text(encoding="utf-8-sig")) if p.exists() else {}
 
+    def _public_intel(self, dependencies) -> dict:
+        """Look up OSV only for manifest dependencies explicitly sourced from PyPI."""
+        if not self.public_intel_enabled:
+            return {}
+        try:
+            return lookup_pypi_dependencies(dependencies, self.registry / "public_intel" / "osv-cache.json")
+        except Exception as error:  # public intel must not make deterministic package checks unavailable
+            return {"source": "OSV", "source_url": "https://osv.dev/", "status": "unavailable",
+                    "queried": 0, "eligible": 0, "skipped_non_pypi_or_invalid": 0,
+                    "known_vulnerable_dependencies": 0, "findings": [], "coverage_complete": False,
+                    "limitations": [str(error)[:300]]}
+
+    @staticmethod
+    def _apply_public_intel(ev: dict, intel: dict) -> dict:
+        """Attach advisory evidence; keep it separate from the model score."""
+        ev["public_intel"] = intel
+        vulnerable = intel.get("findings", [])
+        if not vulnerable:
+            if intel.get("status") in {"partial", "unavailable"}:
+                ev.setdefault("rules", []).append(
+                    f"проверка публичных сведений OSV неполная ({intel.get('status')}); отсутствие результатов не подтверждает безопасность")
+            return ev
+        ids = list(dict.fromkeys(vuln.get("id", "")
+                                 for dependency in vulnerable
+                                 for vuln in dependency.get("vulnerabilities", []) if vuln.get("id")))
+        ev.setdefault("policy_findings", []).append("known_vulnerable_dependency")
+        ev.setdefault("rules", []).append(
+            f"OSV: найдено {len(vulnerable)} уязвимых зависимостей; идентификаторы: {', '.join(ids[:12])}"
+            + (" …" if len(ids) > 12 else ""))
+        ev.setdefault("actions", []).insert(0,
+            "проверьте затронутые версии зависимостей и обновите их по исправленным версиям из источников рекомендаций")
+        if ev.get("verdict") == ALLOW:
+            ev["verdict"] = REVIEW
+            ev["threat"] = "dependency"
+            ev["threat_ru"] = CLASS_RU["dependency"]
+        return ev
+
+    @staticmethod
+    def _rotate_log(path: Path, max_bytes=5_000_000, keep_lines=5000) -> None:
+        """Если журнал разросся — старые записи сами переносятся в архив рядом (ничего не теряется),
+        а в рабочем файле остаются последние keep_lines записей, чтобы чтение и отображение в
+        интерфейсе оставались быстрыми. Ротация — не критичная операция: при ошибке просто пропускаем."""
+        try:
+            if not path.exists() or path.stat().st_size < max_bytes:
+                return
+            lines = path.read_text(encoding="utf-8", errors="replace").splitlines()
+            if len(lines) <= keep_lines:
+                return
+            archive = path.with_name(f"{path.stem}.archive.jsonl")
+            with open(archive, "a", encoding="utf-8") as fh:
+                fh.write("\n".join(lines[:-keep_lines]) + "\n")
+            path.write_text("\n".join(lines[-keep_lines:]) + "\n", encoding="utf-8")
+        except OSError:
+            pass
+
     def _history(self, name, rec) -> None:
+        from .journal import append_record
         base = self._base(name)
         base.mkdir(parents=True, exist_ok=True)
-        with open(base / "history.jsonl", "a", encoding="utf-8") as fh:
-            fh.write(json.dumps({"time": _now(), **rec}, ensure_ascii=False) + "\n")
+        hist = base / "history.jsonl"
+        append_record(hist, {"time": _now(), **rec}, self._rotate_log)
+
+    # ------------------------------------------------- признаки для онлайн-дообучения
+    def extract_features(self, pkg_dir, index_path=None) -> dict | None:
+        """Пересобирает признаки (граф, веса, поведение) кандидата относительно его эталона.
+
+        Используется для онлайн-дообучения (online_learn.maybe_queue) — чтобы сохранить
+        признаки карантинного пакета для возможного последующего дообучения на
+        подтверждённом человеком образце. Возвращает None, если для пакета нет
+        зарегистрированного эталона (дообучаться не на чём).
+        """
+        cand = load_package(pkg_dir, self.key)
+        base = self._base(cand.name)
+        if not (base / "package").exists():
+            return None
+        ref = load_package(base / "package", self.key)
+        index = json.loads(Path(index_path).read_text(encoding="utf-8-sig")) if index_path else self.index()
+        if cand.name not in self._probes:
+            ctrl = base / "control.npz"
+            self._probes[cand.name] = BehaviorProbe(ref.state, *load_control(ctrl)) if ctrl.exists() else None
+        probe = self._probes[cand.name]
+        return extract(ref, cand, index, probe)
 
     # ---------------------------------------------------------------- проверка
     def check(self, pkg_dir, stage="build", index_path=None, strict=False) -> dict:
         """Проверка кандидата относительно зарегистрированного эталона. Возвращает вердикт (dict)."""
         t0 = time.perf_counter()
         cand = load_package(pkg_dir, self.key)
+        intel = self._public_intel(cand.deps)
         base = self._base(cand.name)
         if not (base / "package").exists():
-            raise ValueError(f"для пакета «{cand.name}» не зарегистрирован эталон — добавьте его на вкладке "
-                             f"«Эталоны и версии» (или командой baseline)")
+            ev = self.assess_unbaselined(pkg_dir, stage, intel)
+            if strict and ev["verdict"] == REVIEW:
+                ev["verdict"] = BLOCK
+                ev["rules"].append("строгий режим: пакет без доверенного эталона не допускается")
+            return ev
         ref = load_package(base / "package", self.key)
         no_key = self.key is None
         if no_key:                                       # подпись проверить нечем — не считаем её нарушенной
@@ -155,7 +248,7 @@ class IntegrityGuard:
         index = json.loads(Path(index_path).read_text(encoding="utf-8-sig")) if index_path else self.index()
         ev = {"time": _now(), "stage": stage, "package": cand.name, "version": cand.version,
               "baseline_version": ref.version, "fingerprint": fingerprint(pkg_dir), "rules": [],
-              "hash_control": bool(hash_baseline(ref, cand, index))}
+              "hash_control": bool(hash_baseline(ref, cand, index)), "public_intel": intel}
         if no_key:
             ev["rules"].append("ключ подписи не задан: подпись пакета не проверялась")
         bad_weights = [k for k, v in cand.state.items() if v.is_floating_point() and not torch.isfinite(v).all()]
@@ -168,7 +261,7 @@ class IntegrityGuard:
                 {"component": "model", "score": 1.0}], actions=PLAYBOOK["weights"])
             ev["rules"].append(why)
             ev["timing_ms"] = {"total": round(1000 * (time.perf_counter() - t0), 1)}
-            return ev
+            return self._apply_public_intel(ev, intel)
         if cand.unsafe_format:
             # правило политики: небезопасная сериализация модели блокируется без загрузки файла
             ev.update(verdict=BLOCK, score=1.0, risk_score=100,
@@ -176,7 +269,7 @@ class IntegrityGuard:
                       suspects=[{"component": "model", "score": 1.0}], actions=PLAYBOOK["dependency"])
             ev["rules"].append("модель сериализована небезопасным pickle (возможно исполнение кода при загрузке)")
             ev["timing_ms"] = {"total": round(1000 * (time.perf_counter() - t0), 1)}
-            return ev
+            return self._apply_public_intel(ev, intel)
         if fingerprint(pkg_dir) == fingerprint(base / "package"):
             # Exact byte-for-byte trusted baseline is a deterministic identity match;
             # the learned classifier must not override this provenance check.
@@ -185,7 +278,7 @@ class IntegrityGuard:
                       block_threshold=self.block_threshold, probabilities={}, levels={},
                       suspects=[], layer_anomaly=[], actions=[], baseline_match=True,
                       timing_ms={"total": round(1000 * (time.perf_counter() - t0), 1)})
-            return ev
+            return self._apply_public_intel(ev, intel)
         source_anomalies = opaque_source_anomalies(ref, cand)
         if source_anomalies:
             names = ", ".join(item["module"] for item in source_anomalies[:5])
@@ -242,39 +335,182 @@ class IntegrityGuard:
                   actions=PLAYBOOK[CLASSES[top]] if verdict != ALLOW else [],
                   timing_ms={"collect": round(1000 * (t1 - t0), 1), "analyze": round(1000 * (t2 - t1), 2),
                              "total": round(1000 * (t2 - t0), 1)})
-        return ev
+        return self._apply_public_intel(ev, intel)
+
+    def assess_unbaselined(self, pkg_dir, stage="deploy", public_intel=None) -> dict:
+        """Record an explicit, unscored result when no trusted reference exists.
+
+        First sighting and a locally generated signature are not trust anchors.
+        Objective format checks are recorded as facts, while the pairwise
+        detector and risk score remain unavailable until a reference is found.
+        """
+        t0 = time.perf_counter()
+        cand = load_package(pkg_dir, self.key)
+        intel = public_intel if public_intel is not None else self._public_intel(cand.deps)
+        rules: list[str] = ["доверенный эталон не найден; сравнение целостности и числовая оценка не выполнялись"]
+        facts = {"manifest_parsed": True, "signature_verified": bool(cand.signed_ok) if self.key else None,
+                 "model_pickle_safe": not cand.unsafe_format,
+                 "supported_linear_layers": bool(layers_of(cand.state)) if not cand.unsafe_format else False,
+                 "dependency_count": len(cand.deps), "module_count": len(cand.modules)}
+        verdict, threat, threat_ru, action = (REVIEW, "reference_required",
+                                              "нет доверенного эталона для сравнения",
+                                              "получить и одобрить доверенную версию пакета")
+        if cand.unsafe_format:
+            rules.append("файл модели использует небезопасный pickle или не прошёл статическую проверку формата")
+            verdict, threat, threat_ru = BLOCK, "weights", CLASS_RU["weights"]
+            action = "не загружать модель до получения проверенной сборки"
+        else:
+            bad_weights = [name for name, value in cand.state.items()
+                           if value.is_floating_point() and not torch.isfinite(value).all()]
+            if bad_weights:
+                facts["nonfinite_weights"] = bad_weights[:20]
+                rules.append("обнаружены не конечные значения весов (NaN/Inf): " + ", ".join(bad_weights[:5]))
+                verdict, threat, threat_ru = BLOCK, "weights", CLASS_RU["weights"]
+                action = "не запускать пакет; получить проверенную сборку модели"
+            elif not facts["supported_linear_layers"]:
+                rules.append("модель не относится к поддерживаемому формату Linear+ReLU; сравнение недоступно")
+            if self.key:
+                rules.append("подпись проверена ключом реестра" if cand.signed_ok else
+                             "подпись отсутствует или не прошла проверку ключом реестра")
+            else:
+                rules.append("ключ проверки подписи не настроен; криптографическое происхождение не проверено")
+        event = {"time": _now(), "stage": stage, "package": cand.name, "version": cand.version,
+                "baseline_version": None, "fingerprint": fingerprint(pkg_dir), "rules": rules,
+                "hash_control": None, "analysis_mode": "reference_missing",
+                "assessment_complete": False, "comparison_performed": False,
+                "objective_facts": facts, "model_score": None, "verdict": verdict,
+                "score": None, "risk_score": None, "threat": threat,
+                "threat_ru": threat_ru, "threshold": None, "block_threshold": None,
+                "probabilities": {}, "levels": {}, "suspects": [],
+                "layer_anomaly": [], "actions": [action],
+                "timing_ms": {"collect": round(1000 * (time.perf_counter() - t0), 1),
+                              "analyze": 0.0, "total": round(1000 * (time.perf_counter() - t0), 1)}}
+        event["objective_facts"]["public_intel_status"] = intel.get("status", "not_checked")
+        event["objective_facts"]["public_intel_queried"] = intel.get("queried", 0)
+        event["objective_facts"]["public_intel_coverage_complete"] = intel.get("coverage_complete")
+        return self._apply_public_intel(event, intel)
+
+    def assessment_error(self, pkg_dir, error, stage="deploy") -> dict:
+        """Journal an attempted package assessment that could not parse its manifest/files."""
+        path = Path(pkg_dir)
+        try:
+            fp = fingerprint(path)
+        except OSError:
+            fp = ""
+        message = str(error).replace("\n", " ")[:500]
+        return {"time": _now(), "stage": stage, "package": path.name, "version": "?",
+                "baseline_version": None, "fingerprint": fp, "rules": [
+                    f"проверка пакета не завершена: {message}"],
+                "hash_control": None, "analysis_mode": "intake_validation_error",
+                "assessment_complete": False, "model_score": None, "verdict": REVIEW,
+                "comparison_performed": False, "score": None, "risk_score": None, "threat": "reference_required",
+                "threat_ru": "проверка пакета не завершена", "threshold": None,
+                "block_threshold": None, "probabilities": {}, "levels": {}, "suspects": [],
+                "layer_anomaly": [], "actions": ["проверьте комплектность и читаемость файлов пакета",
+                                                     "повторно поместите исправленный пакет во входящую папку"],
+                "timing_ms": {"collect": 0.0, "analyze": 0.0, "total": 0.0}}
 
     # ---------------------------------------------------------------- реагирование
     def respond(self, ev: dict, pkg_dir=None, promote=False) -> int:
         """Журналирование события для SIEM/SOC, обновление эталона при допуске. Возвращает код возврата."""
-        with open(self.registry / "events.jsonl", "a", encoding="utf-8") as fh:
-            fh.write(json.dumps(ev, ensure_ascii=False) + "\n")
+        ev.setdefault("event_id", uuid.uuid4().hex)
+        if getattr(self, "model_sha256", None):
+            ev.setdefault("model_sha256", self.model_sha256)
+        events = self.registry / "events.jsonl"
+        from .journal import append_record
+        append_record(events, ev, self._rotate_log)
+        evidence = getattr(self, "evidence", None)
+        if evidence is not None:
+            evidence.record_event(ev)
         self._history(ev["package"], {"event": "check", "stage": ev["stage"], "version": ev["version"],
                                       "verdict": ev["verdict"], "threat": ev["threat"], "score": ev["score"],
-                                      "fingerprint": ev["fingerprint"]})
+                                      "fingerprint": ev["fingerprint"], "event_id": ev.get("event_id")})
         if promote and ev["verdict"] == ALLOW and pkg_dir:
             self.register_baseline(pkg_dir, note=f"promoted {ev['version']}")   # контрольный набор сохраняется
         return EXIT_CODE[ev["verdict"]]
 
-    def monitor(self, pkg_dir, interval=30.0, once=False, on_event=None, on_error=None) -> None:
-        """Эксплуатация: контроль развёрнутого пакета; полная проверка — при изменении отпечатка."""
+    def monitor(self, pkg_dir, interval=30.0, once=False, on_event=None, on_error=None,
+                stop_event=None) -> None:
+        """Monitor a deployed package with bounded polling, durable checkpoints and retries.
+
+        A new process rechecks the current package snapshot. Its deterministic event ID
+        makes a crash after journal persistence but before checkpoint persistence safe:
+        replay is deduplicated by the shared journal.
+        """
+        try:
+            interval = float(interval)
+        except (TypeError, ValueError):
+            interval = 30.0
+        if not math.isfinite(interval):
+            interval = 30.0
+        interval = min(3600.0, max(2.0, interval))
+        package = Path(pkg_dir).resolve()
+        monitor_key = hashlib.sha256(str(package).encode("utf-8")).hexdigest()
+        state_path = self.registry / "monitor_state" / f"{monitor_key}.json"
         last = None
-        while True:
-            fp = fingerprint(pkg_dir)
-            if fp != last:
+        failures = 0
+
+        def report_error(error):
+            if on_error:
                 try:
-                    ev = self.check(pkg_dir, stage="runtime")
+                    on_error(error)
+                except Exception:
+                    pass
+
+        while stop_event is None or not stop_event.is_set():
+            try:
+                fp = fingerprint(package)
+                if fp != last:
+                    ev = self.check(package, stage="runtime")
+                    if fingerprint(package) != fp:
+                        raise OSError("пакет изменился во время проверки; результат не сохранён, будет повтор")
+                    event_id = "runtime-" + hashlib.sha256(
+                        f"{package}\0{fp}".encode("utf-8")).hexdigest()
+                    ev["event_id"] = event_id
                     self.respond(ev)
+                    last = fp
+                    failures = 0
+                    try:
+                        state_path.parent.mkdir(parents=True, exist_ok=True)
+                        temporary = state_path.with_suffix(".tmp")
+                        with temporary.open("w", encoding="utf-8") as stream:
+                            json.dump({"fingerprint": fp, "event_id": event_id,
+                                       "checked_at": _now()}, stream)
+                            stream.flush()
+                            os.fsync(stream.fileno())
+                        os.replace(temporary, state_path)
+                    except OSError as state_error:
+                        report_error(state_error)
                     if on_event:
-                        on_event(ev)
-                except (ValueError, OSError) as e:       # повреждённый пакет не должен останавливать наблюдение
-                    if once or on_error is None:
-                        raise
-                    on_error(e)
-                last = fp
+                        try:
+                            on_event(ev)
+                        except Exception as callback_error:  # UI/report callback must not end monitoring
+                            report_error(callback_error)
+            except Exception as error:
+                try:
+                    event = self.assessment_error(package, error, "runtime")
+                    event["event_id"] = "runtime-error-" + hashlib.sha256(
+                        f"{package}\0{type(error).__name__}\0{error}".encode("utf-8", "replace")).hexdigest()
+                    self.respond(event)
+                except Exception as journal_error:
+                    report_error(journal_error)
+                failures += 1
+                report_error(error)
+                if once:
+                    raise
+
             if once:
                 return
-            time.sleep(interval)
+            if stop_event is not None and stop_event.is_set():
+                return
+            delay = interval
+            if failures:
+                retry_delay = min(60.0, 2.0 ** min(failures, 6))
+                delay = min(interval, retry_delay)
+            if stop_event is not None and callable(getattr(stop_event, "wait", None)):
+                stop_event.wait(delay)
+            else:
+                time.sleep(delay)
 
 
 def _risk_score(score: float, thr: float, block_thr: float) -> int:
@@ -306,15 +542,29 @@ def _now() -> str:
 
 def format_event(ev: dict) -> str:
     mark = {ALLOW: "ДОПУСК", REVIEW: "НА ПРОВЕРКУ", BLOCK: "БЛОКИРОВКА"}[ev["verdict"]]
-    rs = ev.get("risk_score", round(ev["score"] * 100))
-    lines = [f"[{mark}] {ev['package']} {ev['baseline_version']} -> {ev['version']}  (стадия: {ev['stage']})",
-             f"  оценка риска: {rs}/100; оценка нарушения: {ev['score']:.3f}; заключение: {ev['threat_ru']}"]
+    baseline = ev.get("baseline_version") or "без эталона"
+    lines = [f"[{mark}] {ev['package']} {baseline} -> {ev['version']}  (стадия: {ev['stage']})",
+             f"  заключение: {ev['threat_ru']}"]
+    if isinstance(ev.get("risk_score"), (int, float)) and isinstance(ev.get("score"), (int, float)):
+        lines.append(f"  балл риска модели: {ev['risk_score']}/100; оценка нарушения: {ev['score']:.3f}")
+    elif ev.get("analysis_mode") == "reference_missing":
+        lines.append("  сравнительная оценка не выполнена: доверенный эталон отсутствует; балл не рассчитывался")
+    elif ev.get("analysis_mode") == "intake_validation_error":
+        lines.append("  оценка не завершена из-за ошибки проверки пакета; балл не рассчитывался")
     if "levels" in ev:
         lines.append("  уровни: " + ", ".join(f"{k} {v:.2f}" for k, v in ev["levels"].items()))
     if ev.get("suspects"):
         lines.append("  подозрительные компоненты: " + ", ".join(f"{s['component']} ({s['score']:.2f})" for s in ev["suspects"]))
+    intel = ev.get("public_intel") or {}
+    if intel:
+        lines.append(f"  OSV: {intel.get('status', 'неизвестно')}; проверено "
+                     f"{intel.get('queried', 0)} из {intel.get('eligible', 0)} PyPI-зависимостей; "
+                     f"совпадений: {intel.get('known_vulnerable_dependencies', 0)} "
+                     "(отсутствие совпадений не подтверждает безопасность)")
     lines += [f"  ! {r}" for r in ev["rules"]]
     lines += [f"  - {a}" for a in ev.get("actions", [])]
-    lines.append(f"  контроль подписи/хешей: {'нарушение' if ev['hash_control'] else 'норма'}; "
+    integrity = ("не оценивался без эталона" if ev.get("hash_control") is None else
+                 "нарушение" if ev["hash_control"] else "норма")
+    lines.append(f"  контроль подписи/хешей: {integrity}; "
                  f"время проверки: {ev['timing_ms']['total']:.0f} мс")
     return "\n".join(lines)

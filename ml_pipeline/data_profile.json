@@ -1,0 +1,15 @@
+{
+  "n_rows": 500,
+  "n_cols": null,
+  "target": "y (9-class: clean + 8 threat classes)",
+  "traits": {
+    "n_rows": 500,
+    "small_data": true,
+    "has_datetime": false,
+    "has_groups": true,
+    "group_col": "pid (project id)",
+    "imbalanced": false,
+    "minority_frac": 0.11
+  },
+  "notes": "Синтетический корпус ПНП (IntegrityGuard), сгенерирован corpus.build_corpus(500, seed=20261111). Один проект = один образец (ровно один кандидат на проект), поэтому group_col=pid эквивалентен построчному сплиту, но сохранён как групповой на будущее (если на проект будет приходиться несколько кандидатов)."
+}

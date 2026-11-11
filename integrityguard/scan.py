@@ -91,7 +91,32 @@ def scan_code(text: str) -> tuple[frozenset[str], frozenset[str]]:
     return frozenset(caps), frozenset(imports)
 
 
-_SAFE_GLOBAL_ROOTS = ("torch", "collections", "numpy", "_codecs")
+# Точечный список допустимых GLOBAL-ссылок, а не целых корневых пакетов: внутри "torch" или "numpy"
+# есть функции, которые не нужны для восстановления тензоров и которые лучше не разрешать по умолчанию
+# (принцип наименьших привилегий для десериализации). Список соответствует тому, что реально встречается
+# в state_dict-чекпоинтах torch.save (см. tools/maintenance/dump_globals.py) плюс стандартные вспомогательные
+# объекты numpy/collections, которые могут понадобиться для сохранённых тензоров/массивов.
+_SAFE_GLOBALS = frozenset({
+    "collections.OrderedDict",
+    "torch._utils._rebuild_tensor_v2",
+    "torch._utils._rebuild_parameter",
+    "torch._utils._rebuild_sparse_tensor",
+    "torch.Tensor",
+    "torch.Size",
+    "torch.FloatStorage", "torch.DoubleStorage", "torch.HalfStorage", "torch.BFloat16Storage",
+    "torch.LongStorage", "torch.IntStorage", "torch.ShortStorage", "torch.CharStorage",
+    "torch.ByteStorage", "torch.BoolStorage",
+    "numpy.core.multiarray._reconstruct",
+    "numpy.core.multiarray.scalar",
+    "numpy.ndarray",
+    "numpy.dtype",
+    "_codecs.encode",
+})
+
+# Жёсткий предел на размер одного распакованного pickle-потока внутри архива .pt (= zip): без него
+# специально собранный архив с огромным коэффициентом сжатия (zip-бомба) исчерпает память ещё до того,
+# как до него доберётся анализ опкодов ниже.
+_MAX_PICKLE_BYTES = 256 * 1024 * 1024  # 256 МБ — заметно больше любого реального data.pkl с весами модели
 
 
 def scan_pickle(data: bytes) -> tuple[bool, list[str]]:
@@ -103,8 +128,17 @@ def scan_pickle(data: bytes) -> tuple[bool, list[str]]:
     payloads = []
     if zipfile.is_zipfile(io.BytesIO(data)):
         with zipfile.ZipFile(io.BytesIO(data)) as z:
-            payloads = [z.read(n) for n in z.namelist() if n.endswith(".pkl")]
+            for info in z.infolist():
+                if not info.filename.endswith(".pkl"):
+                    continue
+                if info.file_size > _MAX_PICKLE_BYTES:
+                    # не распаковываем — сам факт аномального размера уже повод для подозрения
+                    return True, [f"<pkl-поток слишком велик при распаковке: {info.filename}, "
+                                   f"{info.file_size} байт — похоже на zip-бомбу>"]
+                payloads.append(z.read(info))
     else:
+        if len(data) > _MAX_PICKLE_BYTES:
+            return True, [f"<файл слишком велик для анализа как pickle: {len(data)} байт>"]
         payloads = [data]
     bad: list[str] = []
     for p in payloads:
@@ -118,7 +152,7 @@ def scan_pickle(data: bytes) -> tuple[bool, list[str]]:
                     ref = arg.replace(" ", ".")
                 elif op.name == "STACK_GLOBAL" and len(strings) >= 2:
                     ref = f"{strings[-2]}.{strings[-1]}"
-                if ref and ref.split(".")[0] not in _SAFE_GLOBAL_ROOTS:
+                if ref and ref not in _SAFE_GLOBALS:
                     bad.append(ref)
         except Exception:
             bad.append("<не pickle / повреждён>")

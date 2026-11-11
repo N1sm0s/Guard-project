@@ -32,12 +32,6 @@ def cmd_train(a):
     print((Path(a.out) / "report.md").read_text(encoding="utf-8"))
 
 
-def cmd_export(a):
-    from .collect import export_corpus
-    labels = export_corpus(a.out, a.projects, a.seed)
-    print(f"Выгружено пакетов-кандидатов: {len(labels)} -> {a.out} (разметка: labels.json)")
-
-
 def _guard(a):
     from .system import IntegrityGuard
     return IntegrityGuard(a.registry, a.model, Path(a.key).read_bytes() if a.key else None)
@@ -68,39 +62,24 @@ def cmd_monitor(a):
                       lambda err: print(f"Ошибка проверки: {err}", flush=True))
 
 
-def cmd_demo(a):
-    """Сквозная демонстрация: корпус -> обучение -> выгрузка пакетов -> эталон -> проверки."""
-    from .collect import export_corpus
-    from .corpus import build_corpus
-    from .system import IntegrityGuard, format_event
-    from .train import run_experiment
-    out = Path(a.out)
-    print(f"1/4 Формирование корпуса ({a.projects} проектов)")
-    samples = build_corpus(a.projects, 0, progress=_progress)
-    torch.save(samples, out.mkdir(parents=True, exist_ok=True) or out / "corpus.pt")
-    print("2/4 Обучение и оценка")
-    run_experiment(samples, out / "run", a.epochs, ablation=False, log=lambda s: None)
-    print((out / "run" / "report.md").read_text(encoding="utf-8").split("## По уровням")[0])
-    print("3/4 Выгрузка примеров пакетов на диск и регистрация эталона")
-    labels = export_corpus(out / "packages", 1, seed=777)
-    proj = out / "packages" / "project_000"
-    g = IntegrityGuard(out / "registry", out / "run" / "detector.pt", (out / "packages" / "signing.key").read_bytes())
-    g.register_baseline(proj / "reference", proj / "control.npz")
-    print("4/4 Проверка кандидатов (разметка -> вердикт)")
-    ok = 0
-    for lb in labels:
-        c = proj / "candidates" / lb["candidate"]
-        ev = g.check(c, "build", f"{c}.index.json")
-        g.respond(ev)
-        hit = (ev["verdict"] != "ALLOW") == (lb["class"] != "clean")
-        ok += hit
-        print(f"  {'+' if hit else '-'} {lb['candidate']:<36} -> {ev['verdict']:<6} {ev['threat']:<10} {ev['score']:.3f}"
-              f"  [{ev['timing_ms']['total']:.0f} мс]")
-    print(f"Верных решений: {ok}/{len(labels)}. Пример полного события:\n")
-    bad = next(lb for lb in labels if lb["class"] != "clean")
-    c = proj / "candidates" / bad["candidate"]
-    print(format_event(g.check(c, "build", f"{c}.index.json")))
-    print(f"\nЖурнал событий для SIEM: {out / 'registry' / 'events.jsonl'}")
+def cmd_baseline_wheel(a):
+    from .wheel_scan import register_wheel_baseline
+    manifest = register_wheel_baseline(a.wheel, a.registry, source_url=a.source_url,
+                                       provenance_ref=a.provenance_ref)
+    print(json.dumps({key: manifest[key] for key in
+                      ("name", "version", "sha256", "source_url", "provenance_ref")},
+                     ensure_ascii=False, indent=2))
+
+
+def cmd_check_wheel(a):
+    from .wheel_scan import assess_wheel, persist_wheel_event
+    from .report import generate
+    event = assess_wheel(a.wheel, a.registry)
+    persist_wheel_event(event, a.registry)
+    if a.report:
+        generate(event, a.report)
+    print(json.dumps(event, ensure_ascii=False, indent=2))
+    sys.exit({"ALLOW": 0, "BLOCK": 1, "REVIEW": 2}.get(event.get("verdict"), 2))
 
 
 def main(argv=None):
@@ -122,12 +101,6 @@ def main(argv=None):
     s.add_argument("--seed", type=int, default=0)
     s.add_argument("--no-ablation", action="store_true")
     s.set_defaults(fn=cmd_train)
-
-    s = sub.add_parser("export", help="выгрузить корпус в виде каталогов пакетов")
-    s.add_argument("--out", default="packages")
-    s.add_argument("--projects", type=int, default=2)
-    s.add_argument("--seed", type=int, default=1000)
-    s.set_defaults(fn=cmd_export)
 
     s = sub.add_parser("sign", help="подписать пакет")
     s.add_argument("--package", required=True)
@@ -161,12 +134,18 @@ def main(argv=None):
     s.add_argument("--once", action="store_true")
     s.set_defaults(fn=cmd_monitor)
 
-    s = sub.add_parser("demo", help="сквозная демонстрация на малом корпусе")
-    s.add_argument("--out", default="demo")
-    s.add_argument("--projects", type=int, default=30)
-    s.add_argument("--epochs", type=int, default=50)
-    s.add_argument("--workers", type=int, default=0)
-    s.set_defaults(fn=cmd_demo)
+    s = sub.add_parser("baseline-wheel", help="зарегистрировать точный trusted PyPI wheel и его происхождение")
+    s.add_argument("--wheel", required=True, type=Path)
+    s.add_argument("--registry", default="registry")
+    s.add_argument("--source-url", required=True, help="страница проекта или URL артефакта")
+    s.add_argument("--provenance-ref", required=True, help="PyPI attestation URL, digest record или reviewer reference")
+    s.set_defaults(fn=cmd_baseline_wheel)
+
+    s = sub.add_parser("check-wheel", help="статически проверить реальный .whl без установки или исполнения")
+    s.add_argument("--wheel", required=True, type=Path)
+    s.add_argument("--registry", default="registry")
+    s.add_argument("--report", type=Path, help="необязательный путь PDF-отчёта")
+    s.set_defaults(fn=cmd_check_wheel)
 
     for stream in (sys.stdout, sys.stderr):          # консоль Windows может не знать «—», «→» и т. п.
         if stream is not None and hasattr(stream, "reconfigure"):

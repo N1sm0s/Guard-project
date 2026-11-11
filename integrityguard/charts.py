@@ -12,7 +12,7 @@ from PySide6.QtCore import QPointF, QRectF, Qt
 from PySide6.QtGui import QColor, QFont, QPainter, QPainterPath, QPen
 from PySide6.QtWidgets import QSizePolicy, QToolTip, QWidget
 
-SURFACE, GRID, INK, MUTED, ACCENT, SECOND = "#171c25", "#2a3342", "#e6e9ef", "#8b94a5", "#3b82f6", "#e8793a"
+SURFACE, GRID, INK, MUTED, ACCENT, SECOND = "#12151c", "#222733", "#e9ebef", "#8a8f99", "#2bb7ab", "#e8793a"
 STATUS = {"ALLOW": ("Допуск", "#1f9d63"), "REVIEW": ("На проверку", "#d99a1c"), "BLOCK": ("Блокировка", "#e5484d")}
 
 

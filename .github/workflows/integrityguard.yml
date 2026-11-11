@@ -1,0 +1,32 @@
+name: IntegrityGuard
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  check-package:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Установка зависимостей
+        run: pip install -r requirements.txt
+
+      # Реестр эталонов (C:\Users\pavel\AppData\Local\Temp\ig_buttons_2miwpwvz\registry) и обученный детектор (C:\Users\pavel\AppData\Local\Temp\ig_buttons_2miwpwvz\runs\20261111_171458\detector.pt) должны быть доступны по этим
+      # путям на этом шаге — в составе репозитория или восстановлены отдельным шагом (например,
+      # actions/download-artifact) до команды ниже.
+      - name: Проверка целостности пакета
+        run: >
+          python -m integrityguard check
+          --package <путь к каталогу пакета-кандидата>
+          --registry C:\Users\pavel\AppData\Local\Temp\ig_buttons_2miwpwvz\registry
+          --model C:\Users\pavel\AppData\Local\Temp\ig_buttons_2miwpwvz\runs\20261111_171458\detector.pt
+          --stage deploy
+          --strict
+        # Код возврата: 0 — допуск, 1 — блокировка, 2 — на проверку.
+        # Ненулевой код сам останавливает сборку — дополнительно настраивать ничего не нужно.

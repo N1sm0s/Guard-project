@@ -122,7 +122,8 @@ def test_end_to_end(tmp_path):
     assert rep["hybrid"]["binary"]["auc"] > 0.9
     export_corpus(tmp_path / "pk", 1, seed=42)
     proj = tmp_path / "pk" / "project_000"
-    g = IntegrityGuard(tmp_path / "reg", tmp_path / "run" / "detector.pt", (tmp_path / "pk" / "signing.key").read_bytes())
+    g = IntegrityGuard(tmp_path / "reg", tmp_path / "run" / "detector.pt",
+                       (tmp_path / "pk" / "signing.key").read_bytes(), public_intel_enabled=False)
     g.register_baseline(proj / "reference", proj / "control.npz")
     ev = g.check(proj / "reference", index_path=proj / "trusted_index.json")
     assert ev["verdict"] == "ALLOW"                      # эталон против самого себя
@@ -184,7 +185,7 @@ def test_opaque_python_payload_forces_review(tmp_path):
 
     detector_path = tmp_path / "always_allow.pt"
     save_detector(HybridDetector(), detector_path, {"threshold": 1.1, "block_threshold": 1.2})
-    guard = IntegrityGuard(tmp_path / "registry", detector_path)
+    guard = IntegrityGuard(tmp_path / "registry", detector_path, public_intel_enabled=False)
     guard.register_baseline(proj / "reference")
     event = guard.check(candidate)
     assert event["neural_verdict"] == "ALLOW"
@@ -207,7 +208,7 @@ def test_policy_rules_and_bad_input(tmp_path):
     export_corpus(tmp_path / "pk", 1, seed=7, key=key)
     proj = tmp_path / "pk" / "project_000"
     save_detector(HybridDetector(), tmp_path / "d.pt", {"threshold": 0.5, "block_threshold": 0.9})
-    g = IntegrityGuard(tmp_path / "reg", tmp_path / "d.pt", key)
+    g = IntegrityGuard(tmp_path / "reg", tmp_path / "d.pt", key, public_intel_enabled=False)
     g.register_baseline(proj / "reference", proj / "control.npz")
     g.register_baseline(g._base(load_package(proj / "reference", key).name) / "package")   # сам в себя — без потери данных
     assert (g._base(load_package(proj / "reference", key).name) / "package" / "manifest.json").exists()
@@ -234,7 +235,7 @@ def test_policy_rules_and_bad_input(tmp_path):
     with pytest.raises(ValueError):
         g.check(tmp_path)                                   # не каталог пакета
 
-    nokey = IntegrityGuard(tmp_path / "reg2", tmp_path / "d.pt")
+    nokey = IntegrityGuard(tmp_path / "reg2", tmp_path / "d.pt", public_intel_enabled=False)
     nokey.register_baseline(proj / "reference", proj / "control.npz")
     ev = nokey.check(proj / "reference")
     assert any("ключ подписи" in r for r in ev["rules"]) and not ev["hash_control"]

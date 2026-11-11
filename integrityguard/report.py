@@ -162,26 +162,80 @@ def generate(ev: dict[str, Any], out_path: str | Path) -> Path:
 
     # Summary
     section("Сводка проверки")
-    risk = ev.get("risk_score", round(float(ev.get("score", 0)) * 100))
+    risk = ev.get("risk_score")
+    if risk is None and isinstance(ev.get("score"), (int, float)):
+        risk = round(float(ev["score"]) * 100)
+    risk_label = f"{risk} из 100" if risk is not None else "не рассчитывался"
+    score = ev.get("score")
+    score_label = f"{float(score):.4f}" if isinstance(score, (int, float)) else "не рассчитывалась"
     stage_names = {"build": "сборка", "deploy": "поставка", "runtime": "эксплуатация"}
     time_label = _format_event_time(ev.get("time"))
     rows = [
         ("Пакет", f"{ev.get('package', '?')}  |  версия {ev.get('version', '?')}"),
-        ("Доверенный эталон", ev.get("baseline_version", "не указан")),
+        ("Доверенный эталон", ev.get("baseline_version") or "не зарегистрирован"),
         ("Этап контроля", stage_names.get(ev.get("stage"), ev.get("stage", "не указан"))),
         ("Время события", time_label),
-        ("Баллы риска", f"{risk} из 100"),
-        ("Оценка модели", f"{float(ev.get('score', 0)):.4f}"),
-        ("Класс", CLASS_RU.get(ev.get("threat", "clean"), ev.get("threat", "?"))),
+        ("Балл риска модели", risk_label),
+        ("Оценка нарушения", score_label),
+        ("Метод оценки", "Сравнение не выполнено: нет эталона" if ev.get("analysis_mode") == "reference_missing"
+         else "Оценка не завершена" if ev.get("analysis_mode") in {"intake_validation_error", "wheel_validation_error"}
+         else ("Статический анализ wheel и сравнение с точным эталоном"
+               if ev.get("analysis_mode") == "wheel_static" and ev.get("comparison_performed")
+               else "Статический анализ wheel; доверенный эталон не найден"
+               if ev.get("analysis_mode") == "wheel_static"
+               else "Нейросетевое сравнение с эталоном")),
+        ("Класс", ev.get("threat_ru") or CLASS_RU.get(ev.get("threat", "clean"), ev.get("threat", "?"))),
     ]
     y = pdf.get_y()
     for label, value in rows:
-        y = kv_row(label, value, y, value_bold=(label == "Баллы риска"))
+        y = kv_row(label, value, y, value_bold=(label == "Балл риска модели"))
     pdf.set_y(y)
     font(7.5)
     pdf.set_text_color(*_COLORS["muted"])
-    pdf.cell(page_w, 4.5, "Балл риска - индикатор модели, не вероятность подтверждённой атаки.",
+    score_note = ("Без доверенного эталона числовая оценка не рассчитывается."
+                  if ev.get("analysis_mode") == "reference_missing" else
+                  "Проверка не завершена; числовая оценка не рассчитывалась."
+                  if ev.get("analysis_mode") in {"intake_validation_error", "wheel_validation_error"} else
+                  "Для wheel выполнен статический анализ; нейросетевой балл не рассчитывался."
+                  if ev.get("analysis_mode") == "wheel_static" else
+                  "Балл риска - индикатор модели, не вероятность подтверждённой атаки.")
+    pdf.cell(page_w, 4.5, score_note,
              new_x=XPos.LMARGIN, new_y=YPos.NEXT)
+
+    if isinstance(ev.get("objective_facts"), dict) and ev["objective_facts"]:
+        section("Проверяемые факты")
+        fact_names = {"manifest_parsed": "Манифест прочитан", "signature_verified": "Подпись подтверждена",
+                      "model_pickle_safe": "Формат модели безопасен", "supported_linear_layers": "Формат слоёв поддерживается",
+                      "dependency_count": "Зависимостей", "module_count": "Модулей", "nonfinite_weights": "Неконечные веса"}
+        y = pdf.get_y()
+        for key, value in ev["objective_facts"].items():
+            display = "не проверено" if value is None else "да" if value is True else "нет" if value is False else value
+            y = kv_row(fact_names.get(key, key), display, y)
+        pdf.set_y(y)
+
+    intel = ev.get("public_intel") or {}
+    if intel:
+        section("Публичные сведения об уязвимостях")
+        font(8.5)
+        pdf.set_text_color(*_COLORS["ink"])
+        coverage = (f"Источник: OSV; статус запроса: {intel.get('status', 'неизвестно')}; "
+                    f"проверено {intel.get('queried', 0)} из {intel.get('eligible', 0)} публичных PyPI-зависимостей. "
+                    "Совпадение указывает на опубликованную рекомендацию для версии зависимости, "
+                    "а отсутствие совпадений не подтверждает безопасность.")
+        pdf.multi_cell(page_w, 5, coverage)
+        for dependency in intel.get("findings", []):
+            for vulnerability in dependency.get("vulnerabilities", []):
+                identifier = vulnerability.get("id", "OSV record")
+                label = f"{dependency.get('name')} {dependency.get('version')} — {identifier}"
+                summary = vulnerability.get("summary") or "Описание отсутствует в ответе источника."
+                url = vulnerability.get("url", "")
+                pdf.multi_cell(page_w, 5, f"- {label}: {summary}")
+                if url:
+                    pdf.set_text_color(*_COLORS["blue"])
+                    pdf.multi_cell(page_w, 4.5, url)
+                    pdf.set_text_color(*_COLORS["ink"])
+        for issue in intel.get("limitations", [])[:5]:
+            pdf.multi_cell(page_w, 4.5, f"Ограничение запроса: {issue}")
 
     # Integrity levels
     if isinstance(ev.get("levels"), dict) and ev["levels"]:
@@ -221,8 +275,11 @@ def generate(ev: dict[str, Any], out_path: str | Path) -> Path:
 
     # Hash signal is independent evidence, so explain it without overriding the verdict.
     section("Подпись и контрольные хеши")
-    hash_changed = bool(ev.get("hash_control", False))
-    if hash_changed:
+    hash_value = ev.get("hash_control")
+    hash_changed = bool(hash_value)
+    if hash_value is None:
+        message, color = "Сравнение подписи и контрольных хешей невозможно: доверенный эталон отсутствует.", _COLORS["muted"]
+    elif hash_changed:
         message = "Хеш отличается от эталона. Этот сигнал сам по себе не является вердиктом модели."
         if verdict == "ALLOW":
             message += " Проверка модели завершилась допуском; проверьте, что обновление было ожидаемым."
@@ -245,5 +302,152 @@ def generate(ev: dict[str, Any], out_path: str | Path) -> Path:
     pdf.set_text_color(*_COLORS["muted"])
     pdf.ln(2)
     pdf.multi_cell(page_w, 4.2, f"Отпечаток проверенного пакета (SHA-256): {fingerprint}")
+    pdf.output(str(out_path))
+    return out_path
+
+
+def select_period_events(events: list[dict[str, Any]], start_date: str, end_date: str) -> list[dict[str, Any]]:
+    """Select events by inclusive UTC calendar days."""
+    try:
+        from datetime import date, timedelta
+        start_day = date.fromisoformat(str(start_date))
+        end_day = date.fromisoformat(str(end_date))
+    except (TypeError, ValueError) as exc:
+        raise ValueError("Даты периода должны иметь формат YYYY-MM-DD") from exc
+    if end_day < start_day:
+        raise ValueError("Конец периода не может быть раньше его начала")
+    lower = datetime.combine(start_day, datetime.min.time(), timezone.utc)
+    upper = datetime.combine(end_day + timedelta(days=1), datetime.min.time(), timezone.utc)
+
+    def parsed_time(event):
+        value = event.get("time")
+        try:
+            dt = datetime.fromisoformat(str(value).replace("Z", "+00:00"))
+        except (TypeError, ValueError):
+            return None
+        return dt.replace(tzinfo=timezone.utc) if dt.tzinfo is None else dt.astimezone(timezone.utc)
+
+    return [event for event in events if isinstance(event, dict)
+            and (dt := parsed_time(event)) is not None and lower <= dt < upper]
+
+
+def generate_period(events: list[dict[str, Any]], out_path: str | Path,
+                    start_date: str, end_date: str) -> Path:
+    """Create a period summary from stored events; date limits are inclusive UTC days."""
+    try:
+        from fpdf import FPDF, XPos, YPos
+    except ImportError as exc:
+        raise ImportError("Для экспорта в PDF установите пакет: pip install fpdf2") from exc
+
+    from datetime import date
+    start_day = date.fromisoformat(str(start_date))
+    end_day = date.fromisoformat(str(end_date))
+    selected = select_period_events(events, start_date, end_date)
+
+    def parsed_time(event):
+        value = event.get("time")
+        try:
+            dt = datetime.fromisoformat(str(value).replace("Z", "+00:00"))
+        except (TypeError, ValueError):
+            return None
+        return dt.replace(tzinfo=timezone.utc) if dt.tzinfo is None else dt.astimezone(timezone.utc)
+
+    out_path = Path(out_path)
+    out_path.parent.mkdir(parents=True, exist_ok=True)
+    pdf = FPDF(orientation="L", unit="mm", format="A4")
+    family = _register_unicode_font(pdf)
+    pdf.set_margins(12, 13, 12)
+    pdf.set_auto_page_break(True, margin=16)
+    pdf.alias_nb_pages()
+
+    def font(size=9, bold=False):
+        pdf.set_font(family, "B" if bold else "", size)
+
+    def heading(title):
+        font(10, True)
+        pdf.set_fill_color(*_COLORS["pale"])
+        pdf.set_text_color(*_COLORS["ink"])
+        pdf.cell(0, 7, f"  {title}", fill=True, new_x=XPos.LMARGIN, new_y=YPos.NEXT)
+        pdf.ln(1)
+
+    pdf.add_page()
+    font(17, True)
+    pdf.set_text_color(*_COLORS["ink"])
+    pdf.cell(0, 9, "IntegrityGuard — сводный отчёт по событиям",
+             new_x=XPos.LMARGIN, new_y=YPos.NEXT)
+    font(9)
+    pdf.set_text_color(*_COLORS["muted"])
+    pdf.cell(0, 6, f"Период UTC: {start_day.isoformat()} — {end_day.isoformat()}",
+             new_x=XPos.LMARGIN, new_y=YPos.NEXT)
+    pdf.ln(2)
+    pdf.set_draw_color(*_COLORS["blue"])
+    pdf.set_line_width(0.8)
+    pdf.line(pdf.l_margin, pdf.get_y(), pdf.w - pdf.r_margin, pdf.get_y())
+    pdf.ln(4)
+
+    counts = {v: sum(e.get("verdict") == v for e in selected) for v in ("ALLOW", "REVIEW", "BLOCK")}
+    unscored = sum(e.get("score") is None for e in selected)
+    incomplete = sum(e.get("assessment_complete") is False for e in selected)
+    vulnerable = sum(bool((e.get("public_intel") or {}).get("findings")) for e in selected)
+    heading("Итоги периода")
+    font(9)
+    pdf.set_text_color(*_COLORS["ink"])
+    summary = (f"Событий: {len(selected)}    |    Допуск: {counts['ALLOW']}    |    "
+               f"Проверка: {counts['REVIEW']}    |    Блокировка: {counts['BLOCK']}    |    "
+               f"Без числовой оценки: {unscored}    |    Неполных проверок: {incomplete}    |    "
+               f"Событий с находками публичных источников: {vulnerable}")
+    pdf.multi_cell(0, 6, summary)
+    pdf.ln(2)
+    heading("События")
+    widths = [37, 53, 24, 28, 38, 22, 52]
+    headers = ["Время UTC", "Пакет", "Версия", "Вердикт", "Класс / основание", "Риск", "Режим оценки"]
+
+    def table_header():
+        font(8, True)
+        pdf.set_fill_color(*_COLORS["ink"])
+        pdf.set_text_color(*_COLORS["white"])
+        for title, width in zip(headers, widths):
+            pdf.cell(width, 8, title, border=0, fill=True, align="L")
+        pdf.ln()
+
+    table_header()
+    font(7.5)
+    for event in sorted(selected, key=lambda item: str(item.get("time", ""))):
+        if pdf.get_y() > pdf.h - 23:
+            pdf.add_page()
+            table_header()
+            font(7.5)
+        when = parsed_time(event)
+        values = [when.strftime("%Y-%m-%d %H:%M:%S") if when else "—",
+                  str(event.get("package") or "—"), str(event.get("version") or "—"),
+                  _VERDICT_RU.get(event.get("verdict"), str(event.get("verdict") or "—")),
+                  str(event.get("threat_ru") or event.get("threat") or event.get("analysis_mode") or "—"),
+                  "—" if event.get("risk_score") is None else str(event.get("risk_score")),
+                  str(event.get("analysis_mode") or ("comparison" if event.get("comparison_performed") else "—"))]
+        bg = _COLORS["pale"] if pdf.page_no() % 2 else _COLORS["white"]
+        pdf.set_fill_color(*bg)
+        pdf.set_text_color(*_COLORS["ink"])
+        for value, width in zip(values, widths):
+            text = value if len(value) <= 34 else value[:31] + "…"
+            pdf.cell(width, 7, text, border="B", fill=True)
+        pdf.ln()
+
+    if not selected:
+        font(9)
+        pdf.set_text_color(*_COLORS["muted"])
+        pdf.cell(0, 8, "За выбранный период событий нет.", new_x=XPos.LMARGIN, new_y=YPos.NEXT)
+
+    def footer():
+        pdf.set_y(-12)
+        pdf.set_draw_color(*_COLORS["line"])
+        pdf.line(pdf.l_margin, pdf.get_y(), pdf.w - pdf.r_margin, pdf.get_y())
+        pdf.set_y(-10)
+        font(7)
+        pdf.set_text_color(*_COLORS["muted"])
+        pdf.cell(0, 5, f"IntegrityGuard  |  UTC  |  Страница {pdf.page_no()}/{{nb}}", align="C")
+
+    for page in range(1, pdf.page_no() + 1):
+        pdf.page = page
+        footer()
     pdf.output(str(out_path))
     return out_path

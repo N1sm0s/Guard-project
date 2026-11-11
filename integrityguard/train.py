@@ -166,6 +166,50 @@ def train_detector(train, val, epochs=70, lr=2e-3, hidden=64, use=(True, True, T
     return model.eval()
 
 
+def finetune_binary(model, confirmed, ref_val=None, epochs=3, lr=3e-4, fpr=0.02, log=None):
+    """Дообучение уже обученной модели на подтверждённых человеком реальных образцах.
+
+    confirmed — список словарей признаков (x/adj/layers/behav) с полем bin_y
+    (1.0 — подтверждённая человеком угроза, 0.0 — подтверждённое ложное срабатывание
+    из карантина). Правит только бинарную границу "подозрительно/норма" — у реального
+    трафика нет метки конкретного класса угрозы. ref_val — подвыборка исходной
+    train/val выборки (легитимные образцы, y == 0), подмешиваемая в каждый шаг, чтобы
+    модель не забыла ранее выученное поведение (catastrophic forgetting). Несколько
+    шагов градиента на уже обученной модели, а не обучение с нуля.
+
+    Возвращает (model, new_threshold); new_threshold — пересчитанный порог решения
+    (calibrate) на той же подвыборке, или None, если ref_val не передан.
+    """
+    if not confirmed:
+        return model, None
+    model.train()
+    opt = torch.optim.AdamW(model.parameters(), lr=lr, weight_decay=1e-3)
+    ref = list(ref_val or [])
+    for ep in range(max(1, epochs)):
+        batch = list(confirmed)
+        aux = [s for s in ref if s.get("y", -1) == 0] if ref else []
+        if aux:
+            take = min(len(aux), max(4, len(confirmed)))
+            batch = batch + list(np.random.default_rng(ep).choice(aux, take, replace=False))
+        b = collate(batch)
+        out = model(b)
+        probs = F.softmax(out["logits"], -1)
+        score = (1 - probs[:, 0]).clamp(1e-6, 1 - 1e-6)
+        target = torch.tensor(
+            [float(s["bin_y"]) if "bin_y" in s else float(s.get("y", 0) != 0) for s in batch]
+        )
+        loss = F.binary_cross_entropy(score, target)
+        opt.zero_grad()
+        loss.backward()
+        torch.nn.utils.clip_grad_norm_(model.parameters(), 5.0)
+        opt.step()
+        if log:
+            log(f"  дообучение (реальные данные), шаг {ep + 1}: loss {loss.item():.4f}")
+    model.eval()
+    thr = calibrate(model, ref, fpr) if ref else None
+    return model, thr
+
+
 def calibrate(model, val, fpr=0.02):
     """Порог решения по допустимой доле ложных срабатываний на легитимных обновлениях."""
     probs, _, _ = predict(model, val)
@@ -209,6 +253,7 @@ def run_experiment(samples, out_dir, epochs=70, fpr=0.02, seed=0, ablation=True,
     report["split"] = {"train": len(train), "val": len(val), "test": len(test), "target_fpr": fpr,
                        "projects": len({s["pid"] for s in samples})}
     save_detector(model, out / "detector.pt", {"threshold": thr, "block_threshold": max(thr, 0.9)})
+    torch.save(val, out / "ref_val.pt")  # для дальнейшей рекалибровки при онлайн-дообучении (online_learn/finetune_binary)
     (out / "metrics.json").write_text(json.dumps(report, ensure_ascii=False, indent=2), encoding="utf-8")
     (out / "report.md").write_text(render_report(report), encoding="utf-8")
     _plots(report, out)

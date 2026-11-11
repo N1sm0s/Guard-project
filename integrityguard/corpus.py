@@ -297,13 +297,12 @@ def attack_adversarial(spec: PackageSpec, ref_state, task: Task, rng, g, level=1
     effect = acc_clean - acc_adv
     # Синтетические признаки адаптивного входного шлюза/эвазии. Сами примеры
     # остаются инертными: генератор добавляет только анализируемый исходный текст.
-    profiles = [
-        {"dynamic_exec", "network"},
-        {"dynamic_exec", "obfuscation"},
-        {"network", "file_write"},
-    ]
-    caps_adv = profiles[int(rng.integers(0, len(profiles)))]
-    evil_mod = Module("adversarial_hook", stub(caps_adv, rng, filler=int(rng.integers(2, 6))))
+    # Возможности нового модуля берутся из того же распределения, что и у обычных
+    # (легитимных) модулей (_CAP_P) - иначе граф различает класс по единственному
+    # явному "вредоносному" набору флагов, минуя реальный поведенческий анализ.
+    caps_adv = {c for c, p in _CAP_P.items() if rng.random() < p}
+    evil_mod = Module(f"input_gate_{int(rng.integers(1000, 9999))}",
+                      stub(caps_adv, rng, filler=int(rng.integers(2, 6))))
     cand.modules.append(evil_mod)
     meta = {"effect": round(effect, 4), "eps": round(float(eps), 4), "level": level,
             "type": "adversarial", "profile": "+".join(sorted(caps_adv))}
@@ -320,7 +319,11 @@ def attack_extraction(spec: PackageSpec, ref_state, task: Task, rng, g, level=1)
     noise_scale = 0.02 + level * 0.03
     for k in cand.state:
         cand.state[k] = cand.state[k] + noise_scale * torch.randn_like(cand.state[k], generator=g)
-    # Добавляем зависимость для эксфильтрации
+    # Добавляем зависимость для эксфильтрации. Возможности сэмплируются из того
+    # же распределения, что и у обычных (легитимных) зависимостей/модулей
+    # (_CAP_P) - фиксированный набор "network+unsafe_deser+process" делал
+    # граф тривиально отличимым по одному явному признаку, минуя реальный
+    # анализ весов/поведения.
     exfil_dep = Dep(
         f"model-exfil-{int(rng.integers(1, 99))}",
         f"0.{rng.integers(1, 9)}.0",
@@ -328,11 +331,12 @@ def attack_extraction(spec: PackageSpec, ref_state, task: Task, rng, g, level=1)
         "url",
         [],
         int(rng.integers(10000, 80000)),
-        stub({"network", "unsafe_deser", "process"}, rng, filler=int(rng.integers(3, 8)))
+        stub({c for c, p in _CAP_P.items() if rng.random() < p}, rng, filler=int(rng.integers(3, 8)))
     )
     cand.deps.append(exfil_dep)
-    exfil_mod = Module("model_export_hook", stub({"network", "file_write", "unsafe_deser"}, rng,
-                                                   filler=int(rng.integers(3, 8))))
+    exfil_mod = Module(f"export_util_{int(rng.integers(1000, 9999))}",
+                       stub({c for c, p in _CAP_P.items() if rng.random() < p}, rng,
+                            filler=int(rng.integers(3, 8))))
     cand.modules.append(exfil_mod)
     meta = {"noise_scale": round(float(noise_scale), 4), "exfil_dep": exfil_dep.name,
             "level": level, "type": "extraction"}
@@ -356,8 +360,13 @@ def attack_availability(spec: PackageSpec, ref_state, task: Task, rng, g, level=
         for k in cand.state:
             cand.state[k] = torch.randn_like(cand.state[k], generator=g) * 1e6
     else:
-        caps = {"process", "dynamic_exec"} if variant == "loop_inject" else {"process", "file_write", "network"}
-        loop_mod = Module("availability_hook", stub(caps, rng, filler=int(rng.integers(3, 7))))
+        # Возможности сэмплируются из того же распределения, что и у обычных
+        # (легитимных) модулей (_CAP_P), а не из фиксированного "вредоносного"
+        # набора - иначе граф различает этот вариант по единственному явному
+        # признаку, минуя реальный анализ эффекта на доступность/точность.
+        caps = {c for c, p in _CAP_P.items() if rng.random() < p}
+        loop_mod = Module(f"worker_task_{int(rng.integers(1000, 9999))}",
+                          stub(caps, rng, filler=int(rng.integers(3, 7))))
         cand.modules.append(loop_mod)
     xc, yc = task.sample(200, g)
     acc = (predict(cand.state, xc) == yc).float().mean().item()
