@@ -1007,7 +1007,7 @@ class MainWindow(QMainWindow):
         self.res_sub = label("Выберите пакет и нажмите «Проверить».", muted=True, wrap=True)
         self.res_sub.setMinimumHeight(40)
         self.res_sub.setAlignment(Qt.AlignTop | Qt.AlignLeft)
-        self.pdf_btn = QPushButton("⬇ PDF-отчёт")
+        self.pdf_btn = QPushButton("↓ PDF-отчёт")
         self.pdf_btn.setEnabled(False)
         self.pdf_btn.setToolTip("Экспорт отчёта о последней проверке в PDF")
         self.pdf_btn.clicked.connect(self._export_pdf)
@@ -1321,7 +1321,7 @@ class MainWindow(QMainWindow):
         sign.setToolTip("Обычно не нужно — подпись создаётся сама после регистрации. "
                         "Пригодится, если нужно подписать пакет повторно вручную.")
         sign.clicked.connect(lambda: self._sign(sign))
-        self.sbom_btn = QPushButton("⬇ SBOM в свой файл…")
+        self.sbom_btn = QPushButton("↓ SBOM в свой файл…")
         self.sbom_btn.setToolTip("Обычно не нужно — SBOM сохраняется сам после регистрации. "
                                  "Пригодится, чтобы сохранить его в другое место вручную.")
         self.sbom_btn.clicked.connect(lambda: self._export_sbom(self.sbom_btn))
