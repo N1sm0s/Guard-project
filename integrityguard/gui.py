@@ -1798,7 +1798,7 @@ class MainWindow(QMainWindow):
                                                 filt="JSON (*.json)")
         self.candidate_eval_btn = QPushButton("Оценить кандидата")
         self.candidate_eval_btn.clicked.connect(self._evaluate_selected_candidate)
-        self.candidate_promote_btn = QPushButton("Активировать допущенного кандидата")
+        self.candidate_promote_btn = QPushButton("Активировать допущенного кандидата", objectName="primary")
         self.candidate_promote_btn.setToolTip("Перед заменой активной модели оценка запускается повторно; создаётся резервная копия.")
         self.candidate_promote_btn.clicked.connect(self._promote_selected_candidate)
         self.candidate_rollback_btn = QPushButton("Откатить последнюю активацию")
