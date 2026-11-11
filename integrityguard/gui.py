@@ -995,10 +995,12 @@ class MainWindow(QMainWindow):
         self.badge = label("—", wrap=False)
         self.badge.setAlignment(Qt.AlignCenter)
         self.badge.setMinimumSize(190, 54)
+        self.badge.setMaximumHeight(54)
         self._set_badge(None)
         self.risk_badge = label("—", wrap=False)
         self.risk_badge.setAlignment(Qt.AlignCenter)
         self.risk_badge.setMinimumSize(80, 54)
+        self.risk_badge.setMaximumHeight(54)
         self.risk_badge.setStyleSheet("background: #171b24; color: #8a8f99; border-radius: 9px; "
                                       "font-size: 11pt; font-weight: 700; padding: 6px 12px;")
         self.res_title = label("Проверка ещё не выполнялась", "h2", wrap=True)
@@ -1011,12 +1013,13 @@ class MainWindow(QMainWindow):
         self.pdf_btn.clicked.connect(self._export_pdf)
         head = QHBoxLayout()
         head.setSpacing(18)
-        head.addWidget(self.badge)
+        head.addWidget(self.badge, 0, Qt.AlignTop)
         risk_col = QVBoxLayout()
         risk_col.setSpacing(2)
         risk_col.addWidget(label("Риск", muted=True))
         risk_col.addWidget(self.risk_badge)
         head.addLayout(risk_col)
+        head.setAlignment(risk_col, Qt.AlignTop)
         col = QVBoxLayout()
         col.addWidget(self.res_title)
         col.addWidget(self.res_sub)
@@ -1064,9 +1067,9 @@ class MainWindow(QMainWindow):
         return p
 
     def _set_badge(self, verdict):
-        text, color = VERDICT.get(verdict, ("—", "#3a4558"))
+        text, color = VERDICT.get(verdict, ("—", "#2a2f3a"))
         self.badge.setText(text)
-        self.badge.setStyleSheet(f"background: {color}; color: white; border-radius: 10px; font-size: 13pt; "
+        self.badge.setStyleSheet(f"background: {color}; color: white; border-radius: 9px; font-size: 13pt; "
                                  f"font-weight: 700; padding: 6px 18px;")
 
     def _index_for(self, pkg):
