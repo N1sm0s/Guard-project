@@ -1,5 +1,6 @@
 # Окружение и инструменты сборки
 .venv/
+.venv-build/
 build/
 dist/
 __pycache__/
