@@ -33,6 +33,38 @@ def test_osv_queries_only_explicit_public_pypi_dependencies_and_caches_details(t
     assert calls == []
 
 
+def test_osv_detail_cache_survives_sub_microsecond_precision_mismatch(tmp_path, monkeypatch):
+    """OSV's querybatch endpoint can report a vuln's 'modified' timestamp at
+    microsecond precision while the per-vulnerability detail endpoint reports
+    the same instant with extra (nanosecond) digits. A naive string compare
+    between the two would treat every such record as stale forever, defeating
+    the detail cache and refetching on every lookup."""
+    calls = []
+
+    def fake_request(url, payload=None):
+        calls.append(url)
+        if url == threat_intel.OSV_QUERYBATCH:
+            return {"results": [{"vulns": [
+                {"id": "GHSA-test-0001", "modified": "2026-09-10T03:49:48.526758Z"}]}]}
+        return {"id": "GHSA-test-0001", "summary": "Test advisory",
+                "modified": "2026-09-10T03:49:48.526758681Z", "affected": [], "references": []}
+
+    monkeypatch.setattr(threat_intel, "_request", fake_request)
+    deps = [Dep("jinja2", "2.4.1", "", "pypi")]
+    cache = tmp_path / "osv.json"
+
+    first = threat_intel.lookup_pypi_dependencies(deps, cache)
+    assert first["findings"][0]["vulnerabilities"][0]["id"] == "GHSA-test-0001"
+    assert len([u for u in calls if u != threat_intel.OSV_QUERYBATCH]) == 1
+
+    calls.clear()
+    second = threat_intel.lookup_pypi_dependencies(deps, cache)
+    assert second["findings"] == first["findings"]
+    # The detail record must be served from the 7-day cache, not re-fetched,
+    # despite the batch/detail precision mismatch in the 'modified' field.
+    assert [u for u in calls if u != threat_intel.OSV_QUERYBATCH] == []
+
+
 def test_osv_network_failure_is_reported_as_unavailable_not_clean(tmp_path, monkeypatch):
     import urllib.error
 

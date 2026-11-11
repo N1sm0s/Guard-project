@@ -10,6 +10,7 @@ import concurrent.futures
 import json
 import re
 import time
+from datetime import datetime
 from urllib.parse import quote
 import urllib.error
 import urllib.request
@@ -30,6 +31,27 @@ _VERSION = re.compile(r"^[A-Za-z0-9][A-Za-z0-9.+!_-]{0,127}$")
 def _key(name: str, version: str) -> str:
     normalized = re.sub(r"[-_.]+", "-", name).lower()
     return f"PyPI:{normalized}@{version}"
+
+
+def _same_modified(cached_value, batch_value) -> bool:
+    """Compare two OSV 'modified' timestamps for cache-validity purposes.
+
+    OSV's querybatch endpoint and its per-vulnerability detail endpoint can
+    report the same instant at different sub-second precision (observed: the
+    detail endpoint sometimes carries nanosecond digits the batch endpoint
+    truncates to microseconds). A naive string comparison then never matches
+    for those records, which silently defeats the detail cache and forces a
+    pointless re-fetch -- and drops that finding outright if the re-fetch then
+    fails. Parse both as timestamps (Python truncates excess sub-microsecond
+    digits automatically) before falling back to a literal comparison.
+    """
+    if cached_value == batch_value:
+        return True
+    try:
+        return (datetime.fromisoformat(str(cached_value).replace("Z", "+00:00"))
+                == datetime.fromisoformat(str(batch_value).replace("Z", "+00:00")))
+    except (ValueError, TypeError, AttributeError):
+        return False
 
 
 def _public_query(dep) -> dict | None:
@@ -186,7 +208,7 @@ def lookup_pypi_dependencies(dependencies, cache_path) -> dict:
     findings: dict[str, dict] = {}
     for vuln_id, modified in ids.items():
         cached = details_cache.get(vuln_id, {})
-        if (cached.get("modified") == modified
+        if (_same_modified(cached.get("modified"), modified)
                 and now - float(cached.get("checked_at", 0)) <= DETAIL_CACHE_SECONDS):
             findings[vuln_id] = cached.get("value", {"id": vuln_id, "url": OSV_VULN.format(vuln_id)})
         elif len(fetch_ids) < MAX_DETAILS:
