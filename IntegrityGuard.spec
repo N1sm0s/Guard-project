@@ -1,16 +1,28 @@
 # -*- mode: python ; coding: utf-8 -*-
+import os
 import sys
 from pathlib import Path
+
+# Resolve native dependencies only from this interpreter, its packages and
+# Windows. Host tools (Codex, Git, image codecs) may inject incompatible DLLs
+# into PATH. PyInstaller hooks add each package's own DLL directories.
+if sys.platform == 'win32':
+    _windows = Path(os.environ.get('SystemRoot', r'C:\Windows'))
+    os.environ['PATH'] = os.pathsep.join(str(p) for p in (
+        Path(sys.prefix) / 'Scripts', Path(sys.base_prefix),
+        Path(sys.base_prefix) / 'DLLs', _windows / 'System32', _windows,
+    ))
 
 
 a = Analysis(
     ['IntegrityGuard.pyw'],
     pathex=[],
     binaries=[],
-    datas=[('models/detector.pt', 'models'), ('assets', 'assets')],
+    datas=[('models/detector.pt', 'models'), ('assets', 'assets'), ('tools/network-block.ps1', 'tools')],
     hiddenimports=['fpdf'],
     hookspath=[],
-    hooksconfig={},
+    # Training reports save PNG via Agg; no interactive matplotlib UI is used.
+    hooksconfig={'matplotlib': {'backends': ['Agg']}},
     runtime_hooks=['pyinstaller_runtime.py'],
     # The GUI only ever imports PySide6.QtCore/QtGui/QtWidgets/QtNetwork
     # (see gui.py, charts.py, instance.py); PDF reports are rendered with
@@ -22,7 +34,12 @@ a = Analysis(
               'PySide6.QtQuick3D', 'PySide6.QtPdf', 'PySide6.QtPdfWidgets',
               'PySide6.QtOpenGL', 'PySide6.QtOpenGLWidgets',
               'PySide6.QtWebEngineCore', 'PySide6.QtWebEngineWidgets',
-              'PySide6.QtWebEngineQuick', 'PySide6.QtWebChannel'],
+              'PySide6.QtWebEngineQuick', 'PySide6.QtWebChannel',
+              # Developer-only entry points; retain torch's runtime helpers,
+              # distributed imports and source files needed by introspection.
+              'pytest', '_pytest', 'IPython', 'notebook', 'sphinx',
+              'torch.utils.benchmark', 'torch.utils.bottleneck',
+              'matplotlib.testing', 'numpy.f2py'],
     # NOTE: torch.distributed/torch.onnx/torch.testing were tried as excludes
     # too and reverted -- torch's own __init__ imports torch.distributed
     # unconditionally even for single-process CPU use, so excluding it broke

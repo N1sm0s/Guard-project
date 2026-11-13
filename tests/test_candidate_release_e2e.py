@@ -1,29 +1,9 @@
-"""Real, non-mocked end-to-end test of the candidate-release lifecycle.
+"""Disabled release integration placeholder.
 
-Every existing test for this pipeline (test_online_candidate.py, test_release.py,
-test_candidate_eval.py) monkeypatches load_detector / finetune_binary /
-evaluate_candidate -- none of them exercises the real model, the real
-fine-tuning code and the real feature-extraction pipeline together, through
-the full chain. This test closes that gap.
-
-It uses:
-  - the project's own real, already-trained detector (models/detector.pt,
-    the same fixture test_unbaselined.py uses) as the active model;
-  - the project's own real corpus/feature-extraction code (corpus.gen_project)
-    to build both the human-audit "confirmed" training buffer and the
-    independent evaluation holdout, with real graph/weight/behavioral
-    features (not synthetic placeholders);
-  - the real online_learn.build_candidate, candidate_eval.evaluate_candidate,
-    release.promote_candidate and release.rollback_candidate, unmodified.
-
-Runtime: roughly 1-2 minutes (MIN_CLEAN + MIN_ATTACK synthetic projects are
-generated through the real pipeline to satisfy the statistical release gate's
-minimum sample counts).
-
-The release gate's eligibility is a statistical outcome of this specific
-random draw, not something this test dictates; if the candidate does not
-clear it, the test still asserts that build_candidate and evaluate_candidate
-ran correctly and honestly, and skips only the promote/rollback assertions.
+A previous version generated synthetic package projects and labelled the
+holdout as real. That cannot prove independent provenance or release quality.
+The scenario remains skipped until independently collected and reviewed real
+training and holdout artifacts are available.
 """
 from __future__ import annotations
 
@@ -72,6 +52,7 @@ def _holdout_sample(pid: int, class_name: str, event_id: str) -> dict:
             "_label_evidence": "independently reviewed end-to-end test fixture"}
 
 
+@pytest.mark.skip(reason="Requires independently sourced real training and holdout corpora; synthetic package fixtures are prohibited")
 @pytest.mark.skipif(not MODEL.is_file(), reason="repo's trained detector fixture (models/detector.pt) is missing")
 def test_full_candidate_release_lifecycle_with_real_model_and_features(tmp_path):
     data_root = tmp_path / "data"

@@ -65,9 +65,9 @@ def cmd_monitor(a):
 def cmd_baseline_wheel(a):
     from .wheel_scan import register_wheel_baseline
     manifest = register_wheel_baseline(a.wheel, a.registry, source_url=a.source_url,
-                                       provenance_ref=a.provenance_ref)
+                                       provenance_ref=a.provenance_ref, verify_pypi=a.verify_pypi)
     print(json.dumps({key: manifest[key] for key in
-                      ("name", "version", "sha256", "source_url", "provenance_ref")},
+                      ("name", "version", "sha256", "source_url", "provenance_ref", "source_verification")},
                      ensure_ascii=False, indent=2))
 
 
@@ -82,9 +82,69 @@ def cmd_check_wheel(a):
     sys.exit({"ALLOW": 0, "BLOCK": 1, "REVIEW": 2}.get(event.get("verdict"), 2))
 
 
+def cmd_train_candidate(a):
+    from .online_learn import candidate_readiness, build_candidate
+    readiness = candidate_readiness(a.data_root)
+    if not readiness["ready"]:
+        print(json.dumps({"status": "insufficient_confirmed_data", **readiness}, ensure_ascii=False, indent=2))
+        return
+    from .training_process import training_lock
+    with training_lock(a.data_root):
+        result = build_candidate(a.data_root, a.model, device=a.device, cpu_threads=a.cpu_threads)
+    print(json.dumps(result, ensure_ascii=False, indent=2))
+
+
+def cmd_network_capture(a):
+    import psutil
+    from .network_ai import NetworkTelemetry
+    from .network_evidence import NetworkEventLog
+    telemetry = NetworkTelemetry()
+    snapshot = telemetry.sample(psutil)
+    log = NetworkEventLog(Path(a.data_root) / "online" / "network_events.sqlite")
+    event_id = log.capture(snapshot)
+    print(json.dumps({"event_id": event_id,
+                      "remote_endpoint_count": snapshot.get("remote_endpoint_count"),
+                      "flows": [{"id": f["id"], "remote_ip": f["remote_ip"],
+                                 "connections": f["connection_count"]}
+                                for f in snapshot.get("remote_endpoints", [])]},
+                     ensure_ascii=False, indent=2))
+
+
+def cmd_network_events(a):
+    from .network_evidence import NetworkEventLog
+    log = NetworkEventLog(Path(a.data_root) / "online" / "network_events.sqlite")
+    print(json.dumps(log.list_recent(a.limit), ensure_ascii=False, indent=2))
+
+
+def cmd_network_label(a):
+    from .network_evidence import NetworkEventLog
+    from .network_label_reviews import NetworkLabelReviews
+    log = NetworkEventLog(Path(a.data_root) / "online" / "network_events.sqlite")
+    event = log.get(a.event_id)
+    if event is None:
+        print(json.dumps({"error": "событие не найдено"}, ensure_ascii=False))
+        sys.exit(1)
+    flow_ids = {flow["id"] for flow in event["snapshot"].get("remote_endpoints", [])}
+    if a.flow_id not in flow_ids:
+        print(json.dumps({"error": "указанный flow-id отсутствует в этом захваченном снимке",
+                          "known_flow_ids": sorted(flow_ids)}, ensure_ascii=False))
+        sys.exit(1)
+    reviews = NetworkLabelReviews(Path(a.data_root) / "online" / "network_label_reviews.sqlite")
+    decision = reviews.propose(a.event_id, a.flow_id, event["snapshot_sha256"],
+                               a.verdict == "malicious", a.evidence, a.rationale)
+    print(json.dumps(decision, ensure_ascii=False, indent=2))
+
+
 def main(argv=None):
     p = argparse.ArgumentParser(prog="integrityguard", description="Контроль целостности пакетно-нейросетевых программ")
     sub = p.add_subparsers(dest="cmd", required=True)
+
+    s = sub.add_parser("train-candidate", help="дообучить отдельного кандидата на подтверждённых реальных данных")
+    s.add_argument("--data-root", required=True, type=Path)
+    s.add_argument("--model", required=True, type=Path)
+    s.add_argument("--device", choices=("auto", "cpu", "cuda"), default="auto")
+    s.add_argument("--cpu-threads", type=int, default=4, help="число CPU-потоков PyTorch для дообучения (по умолчанию 4)")
+    s.set_defaults(fn=cmd_train_candidate)
 
     s = sub.add_parser("corpus", help="сформировать корпус примеров нарушений (признаки)")
     s.add_argument("--projects", type=int, default=300)
@@ -135,6 +195,8 @@ def main(argv=None):
     s.set_defaults(fn=cmd_monitor)
 
     s = sub.add_parser("baseline-wheel", help="зарегистрировать точный trusted PyPI wheel и его происхождение")
+    s.add_argument("--verify-pypi", action="store_true",
+                   help="сверить SHA-256 с PyPI; отправляются только имя и версия публичного пакета")
     s.add_argument("--wheel", required=True, type=Path)
     s.add_argument("--registry", default="registry")
     s.add_argument("--source-url", required=True, help="страница проекта или URL артефакта")
@@ -146,6 +208,24 @@ def main(argv=None):
     s.add_argument("--registry", default="registry")
     s.add_argument("--report", type=Path, help="необязательный путь PDF-отчёта")
     s.set_defaults(fn=cmd_check_wheel)
+
+    s = sub.add_parser("network-capture", help="сохранить реальный снимок сетевой телеметрии для последующей разметки")
+    s.add_argument("--data-root", required=True, type=Path)
+    s.set_defaults(fn=cmd_network_capture)
+
+    s = sub.add_parser("network-events", help="показать последние захваченные снимки сетевой телеметрии")
+    s.add_argument("--data-root", required=True, type=Path)
+    s.add_argument("--limit", type=int, default=20)
+    s.set_defaults(fn=cmd_network_events)
+
+    s = sub.add_parser("network-label", help="подтвердить метку (benign/malicious) для конкретного потока в захваченном снимке")
+    s.add_argument("--data-root", required=True, type=Path)
+    s.add_argument("--event-id", required=True)
+    s.add_argument("--flow-id", required=True)
+    s.add_argument("--verdict", required=True, choices=("benign", "malicious"))
+    s.add_argument("--evidence", required=True, type=Path)
+    s.add_argument("--rationale", required=True)
+    s.set_defaults(fn=cmd_network_label)
 
     for stream in (sys.stdout, sys.stderr):          # консоль Windows может не знать «—», «→» и т. п.
         if stream is not None and hasattr(stream, "reconfigure"):

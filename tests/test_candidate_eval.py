@@ -29,6 +29,15 @@ def write_holdout(directory, candidate, samples, **overrides):
     return path
 
 
+def candidate_manifest(**overrides):
+    candidate = {"candidate_id": "cand-1", "training_event_ids": ["train-1"],
+                 "training_fingerprints": ["sha-train-1"],
+                 "training_project_ids": ["train-project"],
+                 "training_project_ids_complete": True}
+    candidate.update(overrides)
+    return candidate
+
+
 def test_wilson_intervals_are_conservative_for_release_gates():
     lower, upper = wilson(90, 100)
     assert 0.80 < lower < 0.84
@@ -59,8 +68,7 @@ def test_release_gate_rejects_regression_and_nan_auc():
 
 
 def test_holdout_manifest_requires_real_independent_provenance(tmp_path):
-    candidate = {"candidate_id": "cand-1", "training_event_ids": ["train-1"],
-                 "training_fingerprints": ["sha-train-1"]}
+    candidate = candidate_manifest()
     path = write_holdout(tmp_path, candidate, [valid_sample()])
     manifest, samples, sha, manifest_sha, sample_path = _validate_holdout(path, candidate)
     assert manifest["data_kind"] == "real"
@@ -77,15 +85,14 @@ def test_holdout_manifest_requires_real_independent_provenance(tmp_path):
     valid_sample(event_id="new-event", fingerprint="sha-train-1"),
 ])
 def test_holdout_overlap_with_training_is_rejected(tmp_path, sample):
-    candidate = {"candidate_id": "cand-1", "training_event_ids": ["train-1"],
-                 "training_fingerprints": ["sha-train-1"]}
+    candidate = candidate_manifest()
     path = write_holdout(tmp_path, candidate, [sample])
     with pytest.raises(ValueError, match="пересекается"):
         _validate_holdout(path, candidate)
 
 
 def test_holdout_tampering_and_duplicate_fingerprints_are_rejected(tmp_path):
-    candidate = {"candidate_id": "cand-1", "training_event_ids": [], "training_fingerprints": []}
+    candidate = candidate_manifest(training_event_ids=[], training_fingerprints=[])
     path = write_holdout(tmp_path, candidate, [valid_sample(), valid_sample("holdout-2", "sha-holdout-1")])
     with pytest.raises(ValueError, match="повторные"):
         _validate_holdout(path, candidate)

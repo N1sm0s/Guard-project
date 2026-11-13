@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import json
 import hashlib
+import os
 import sqlite3
 import time
 from pathlib import Path
@@ -74,6 +75,7 @@ def maybe_queue(data_root: Path, event: dict, features: dict, rng=None, evidence
     queue = _load_queue(d)
     queue.append({"id": item_id, "time": event.get("time") or time.strftime("%Y-%m-%d %H:%M:%S"),
                  "package": event.get("package", ""), "verdict": event.get("verdict", ""),
+                 "project_id": event.get("project_id") or event.get("package", ""),
                  "threat_ru": event.get("threat_ru", ""), "score": event.get("score"),
                  "event_id": event.get("event_id"), "fingerprint": event.get("fingerprint"),
                  "model_sha256": event.get("model_sha256"), "feature_sha256": feature_sha,
@@ -91,7 +93,7 @@ def pending_count(data_root: Path) -> int:
     return len(_load_queue(_dirs(data_root)))
 
 
-def confirm(data_root: Path, item_id: str, is_attack: bool) -> dict | None:
+def confirm(data_root: Path, item_id: str, is_attack: bool, *, evidence_path=None, rationale="") -> dict | None:
     """Подтверждение/отклонение аудит-записи человеком.
 
     is_attack=True  — подтверждена настоящая угроза (бинарная метка 1).
@@ -103,20 +105,27 @@ def confirm(data_root: Path, item_id: str, is_attack: bool) -> dict | None:
     item = next((it for it in queue if it["id"] == item_id), None)
     if item is None:
         return None
+    from .audit_reviews import AuditReviews
+    if evidence_path is None:
+        raise ValueError("Для разметки требуется файл свидетельства и обоснование")
+    reviews = AuditReviews(d / "label_reviews.sqlite")
+    decision = reviews.propose(item.get("event_id"), item.get("fingerprint"), is_attack, evidence_path, rationale)
+    if not decision["accepted"]:
+        return {**item, "review_status": decision["status"]}
     src = d / "pending" / f"{item_id}.pt"
     if not src.exists():
-        return item
+        raise ValueError("Файл признаков отсутствует; метка не добавлена в обучение")
     try:
         feats = torch.load(src, map_location="cpu", weights_only=True)
-    except (OSError, RuntimeError, EOFError):
-        src.unlink(missing_ok=True)
-        return item
+    except (OSError, RuntimeError, EOFError) as error:
+        raise ValueError("Не удалось прочитать признаки; исходный файл сохранён для проверки") from error
     buf = _load_confirmed(d)
     event_id = item.get("event_id")
     if event_id and any(sample.get("_event_id") == event_id for sample in buf):
         for sample in buf:
             if sample.get("_event_id") == event_id:
                 sample["bin_y"] = float(bool(is_attack))
+                sample["_review_ids"] = decision["review_ids"]
         confirmed_path = d / "confirmed.pt"
         temp_path = confirmed_path.with_suffix(".tmp")
         torch.save(buf, temp_path)
@@ -130,8 +139,10 @@ def confirm(data_root: Path, item_id: str, is_attack: bool) -> dict | None:
         return item
     buf.append({**feats, "bin_y": float(bool(is_attack)), "_event_id": event_id or "",
                 "_fingerprint": item.get("fingerprint") or "",
+                "_project_id": item.get("project_id") or item.get("package") or "",
                 "_model_sha256": item.get("model_sha256") or "",
                 "_label_source": "human_audit"})
+    buf[-1]["_review_ids"] = decision["review_ids"]
     confirmed_path = d / "confirmed.pt"
     temp_path = confirmed_path.with_suffix(".tmp")
     torch.save(buf, temp_path)
@@ -158,7 +169,17 @@ def _load_confirmed(d: Path) -> list:
 
 def load_confirmed(data_root: Path) -> list:
     """Подтверждённые человеком реальные образцы, готовые к дообучению."""
-    return _load_confirmed(_dirs(data_root))
+    d = _dirs(data_root)
+    from .audit_reviews import AuditReviews
+    reviews = AuditReviews(d / "label_reviews.sqlite")
+    eligible = []
+    for sample in _load_confirmed(d):
+        if not isinstance(sample, dict) or not sample.get("_review_ids"):
+            continue
+        decision = reviews.decision(sample.get("_event_id"), sample.get("_fingerprint"))
+        if decision["accepted"] and decision["label"] == sample.get("bin_y") and decision["review_ids"] == sample["_review_ids"]:
+            eligible.append(sample)
+    return eligible
 
 
 def confirmed_count(data_root: Path) -> int:
@@ -176,6 +197,9 @@ def _confirmed_data_sha(samples: list[dict]) -> str:
     for sample in sorted(samples, key=lambda row: str(row.get("_event_id", ""))):
         digest.update(str(int(float(sample.get("bin_y", 0.0)) >= 0.5)).encode())
         digest.update(str(sample.get("_event_id", "")).encode("utf-8", "replace"))
+        digest.update(json.dumps([sample.get("_project_id"), sample.get("_fingerprint")],
+                                 ensure_ascii=True).encode())
+        digest.update(json.dumps(sample.get("_review_ids", []), sort_keys=True).encode())
         for name in ("x", "adj", "layers", "behav"):
             value = sample[name]
             array = value.detach().cpu().contiguous().numpy() if hasattr(value, "detach") else np.asarray(value)
@@ -239,13 +263,17 @@ def finish_candidate_schedule(data_root: Path, status: str, candidate_id: str | 
                    (str(status)[:80], candidate_id))
 
 
-def build_candidate(data_root: Path, model_path: Path, ref_val=None) -> dict | None:
+def build_candidate(data_root: Path, model_path: Path, ref_val=None, device="auto", cpu_threads=4) -> dict | None:
     """Train and persist an isolated candidate; never replace the active detector.
 
     Promotion is deliberately left to a later independent-evaluation gate. The
     confirmed examples remain in the evidence buffer until an explicit lifecycle
     decision consumes them.
     """
+    if ref_val is not None:
+        raise ValueError("Непроверенная ref_val не допускается: нужна отдельная подтверждённая реальная выборка")
+    if isinstance(cpu_threads, bool) or not isinstance(cpu_threads, int) or not 1 <= cpu_threads <= (os.cpu_count() or 1):
+        raise ValueError("Число потоков должно быть от 1 до числа логических процессоров")
     confirmed = load_confirmed(data_root)
     readiness = candidate_readiness(data_root)
     if not readiness["ready"]:
@@ -280,9 +308,15 @@ def build_candidate(data_root: Path, model_path: Path, ref_val=None) -> dict | N
     model, meta = load_detector(model_path)
     import torch
     previous_threads = torch.get_num_threads()
-    torch.set_num_threads(1)
+    if device not in ("auto", "cpu", "cuda"):
+        raise ValueError("Устройство обучения: auto, cpu или cuda")
+    training_device = "cuda" if device == "auto" and torch.cuda.is_available() else (
+        "cpu" if device == "auto" else device)
+    if training_device == "cuda" and not torch.cuda.is_available():
+        raise ValueError("CUDA недоступна в этом окружении обучения")
+    torch.set_num_threads(cpu_threads)
     try:
-        model, threshold = finetune_binary(model, selected, ref_val, epochs=3)
+        model, threshold = finetune_binary(model, selected, ref_val, epochs=3, device=training_device)
     finally:
         torch.set_num_threads(previous_threads)
     threshold = threshold if threshold is not None else meta.get("threshold", 0.5)
@@ -295,13 +329,18 @@ def build_candidate(data_root: Path, model_path: Path, ref_val=None) -> dict | N
                 "artifact": str(artifact), "parent_model": str(model_path),
                 "parent_model_sha256": active_sha, "training_data_sha256": data_sha,
                 "training_event_ids": sorted({str(s.get("_event_id")) for s in confirmed if s.get("_event_id")}),
+                "training_project_ids": sorted({str(s.get("_project_id", "")).strip() for s in confirmed
+                                                 if str(s.get("_project_id", "")).strip()}),
+                "training_project_ids_complete": all(isinstance(s.get("_project_id"), str) and
+                                                     s["_project_id"].strip() for s in confirmed),
                 "training_fingerprints": sorted({str(s.get("_fingerprint")) for s in confirmed
                                                   if s.get("_fingerprint")}),
                 "confirmed_sample_count": len(confirmed), "training_sample_count": len(selected),
-                "resource_limits": {"device": "cpu", "torch_threads": 1, "epochs": 3,
+                "resource_limits": {"device": training_device, "torch_threads": cpu_threads, "epochs": 3,
                                     "max_samples": MAX_CANDIDATE_SAMPLES},
                 "status": "awaiting_independent_evaluation",
                 "evaluation": None,
+                "calibration": "parent_threshold_retained; no_verified_calibration_dataset",
                 "promotion_allowed": False,
                 "limitations": ["нет независимого набора реальных пакетов для оценки",
                                 "кандидат не активирован; рабочая модель не изменена"]}

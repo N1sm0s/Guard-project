@@ -5,6 +5,7 @@ import hashlib
 import json
 import math
 import os
+import re
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -22,6 +23,24 @@ MIN_RECALL_LOWER_95 = 0.80
 MAX_FPR_REGRESSION = 0.01
 MAX_RECALL_REGRESSION = 0.02
 MAX_AUC_REGRESSION = 0.02
+
+
+def validate_project_separation(candidate: dict, samples: list[dict]) -> None:
+    """Reject overlap with fine-tuning projects; never infer missing lineage."""
+    def normalized(value):
+        if not isinstance(value, str) or not value.strip():
+            raise ValueError("Для контроля утечки нужен непустой project_id")
+        return re.sub(r"[-_.]+", "-", value.strip()).casefold()
+
+    projects = candidate.get("training_project_ids")
+    if candidate.get("training_project_ids_complete") is not True or not isinstance(projects, list) or not projects:
+        raise ValueError("История проектов обучения неполна; независимость оценки не подтверждена")
+    train_projects = {normalized(value) for value in projects}
+    for sample in samples:
+        if not isinstance(sample, dict):
+            raise ValueError("Неверный формат образца независимой оценки")
+        if normalized(sample.get("_project_id")) in train_projects:
+            raise ValueError("Независимая выборка пересекается с проектами обучения")
 
 
 def sha256_file(path: str | Path) -> str:
@@ -100,6 +119,8 @@ def _validate_holdout(manifest_path: Path, candidate: dict) -> tuple[dict, list[
     samples = torch.load(sample_path, map_location="cpu", weights_only=True)
     if not isinstance(samples, list) or len(samples) != int(manifest["sample_count"]):
         raise ValueError("Число образцов не совпадает с манифестом оценки")
+
+    validate_project_separation(candidate, samples)
 
     train_ids = set(candidate.get("training_event_ids", []))
     train_fingerprints = set(candidate.get("training_fingerprints", []))
@@ -196,6 +217,8 @@ def evaluate_candidate(data_root: str | Path, candidate_id: str,
               "candidate_metrics": candidate_metrics, "decision": decision,
               "release_eligible": decision["eligible"],
               "promotion_performed": False,
+              "project_separation": "verified_against_candidate_finetuning_data",
+              "parent_training_independence": "not_verified_by_this_check",
               "note": "Оценка не активирует кандидата автоматически."}
     candidate["evaluation"] = result
     candidate["status"] = "release_eligible" if decision["eligible"] else "rejected_by_release_gate"

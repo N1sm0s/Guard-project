@@ -29,10 +29,11 @@ def test_online_feedback_creates_isolated_candidate_not_live_model(tmp_path, mon
 
     monkeypatch.setattr(model, "load_detector", lambda _path: (DummyModel(), {"threshold": 0.4}))
 
-    def train_candidate(candidate_model, samples, _ref_val, epochs):
+    def train_candidate(candidate_model, samples, _ref_val, epochs, device):
         calls["train"] += 1
         assert len(samples) == 20
         assert epochs == 3
+        assert device in {"cpu", "cuda"}
         assert torch.get_num_threads() == 1
         return candidate_model, 0.6
 
@@ -43,8 +44,8 @@ def test_online_feedback_creates_isolated_candidate_not_live_model(tmp_path, mon
 
     monkeypatch.setattr(model, "save_detector", save_candidate)
 
-    first = online_learn.build_candidate(data_root, active)
-    second = online_learn.build_candidate(data_root, active)
+    first = online_learn.build_candidate(data_root, active, cpu_threads=1)
+    second = online_learn.build_candidate(data_root, active, cpu_threads=1)
 
     assert first["candidate_id"] == second["candidate_id"]
     assert first["status"] == "awaiting_independent_evaluation"

@@ -2,11 +2,13 @@ import hashlib
 import io
 import json
 import sqlite3
+from unittest.mock import patch
 
 import numpy as np
 import torch
 
 from integrityguard.evidence import EvidenceStore
+from integrityguard.audit_reviews import AuditReviews
 from integrityguard.online_learn import confirm, list_pending, maybe_queue
 
 
@@ -53,8 +55,9 @@ def test_evidence_links_model_event_features_and_human_label(tmp_path):
 def test_audit_feedback_persists_feature_and_label_provenance(tmp_path):
     data_root = tmp_path / "data"
     store = EvidenceStore(tmp_path / "registry" / "evidence.sqlite")
+    fingerprint = "a" * 64
     event = {"event_id": "audit-event", "time": "2026-11-11T10:00:00+00:00", "package": "pkg",
-             "version": "1", "fingerprint": "fp", "verdict": "REVIEW", "model_sha256": "model"}
+             "version": "1", "fingerprint": fingerprint, "verdict": "REVIEW", "model_sha256": "model"}
     store.record_event(event)
     features = {"x": torch.ones((2, 3)), "adj": torch.eye(2),
                 "layers": torch.ones((1, 4)), "behav": torch.zeros(5)}
@@ -64,11 +67,19 @@ def test_audit_feedback_persists_feature_and_label_provenance(tmp_path):
     assert item["model_sha256"] == "model"
     assert item["feature_sha256"]
 
-    confirmed = confirm(data_root, item_id, True)
+    evidence_path = tmp_path / "primary-source.txt"
+    evidence_path.write_text("Independently reviewed evidence for the labelled artifact.", encoding="utf-8")
+    rationale = "The primary source identifies this artifact and documents the observed issue."
+    reviews = AuditReviews(data_root / "online" / "label_reviews.sqlite")
+    with patch("integrityguard.audit_reviews.reviewer_identity", return_value="reviewer-a"):
+        first_review = reviews.propose("audit-event", fingerprint, True, evidence_path, rationale)
+    assert first_review["accepted"] is False
+    with patch("integrityguard.audit_reviews.reviewer_identity", return_value="reviewer-b"):
+        confirmed = confirm(data_root, item_id, True, evidence_path=evidence_path, rationale=rationale)
     assert confirmed["bin_y"] == 1.0
     buf = torch.load(data_root / "online" / "confirmed.pt", map_location="cpu", weights_only=True)
     assert buf[0]["_event_id"] == "audit-event"
-    assert buf[0]["_fingerprint"] == "fp"
+    assert buf[0]["_fingerprint"] == fingerprint
     with sqlite3.connect(store.path) as db:
         assert db.execute("SELECT label FROM confirmed_labels WHERE event_id='audit-event'").fetchone()[0] == "attack"
 

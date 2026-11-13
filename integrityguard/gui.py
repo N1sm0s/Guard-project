@@ -2,7 +2,12 @@
 from __future__ import annotations
 
 import json
+import getpass
+import hashlib
+import ipaddress
+import os
 import shutil
+import subprocess
 import sys
 import time
 import traceback
@@ -12,13 +17,15 @@ from pathlib import Path
 from PySide6.QtCore import QDate, QSettings, Qt, QThread, QTimer, Signal
 from PySide6.QtGui import QAction, QColor, QFont, QIcon, QPalette
 from PySide6.QtWidgets import (QApplication, QButtonGroup, QCheckBox, QComboBox, QDoubleSpinBox, QFileDialog, QFrame,
-                               QGridLayout, QHBoxLayout, QHeaderView, QLabel, QLineEdit, QMainWindow, QMenu, QMessageBox,
+                               QGridLayout, QHBoxLayout, QHeaderView, QInputDialog, QLabel, QLineEdit, QMainWindow, QMenu, QMessageBox,
                                QDateEdit, QPlainTextEdit, QProgressBar, QPushButton, QScrollArea, QSpinBox, QStackedWidget,
                                QSystemTrayIcon, QTableWidget, QTableWidgetItem, QVBoxLayout, QWidget)
 
 from .charts import ACCENT, SECOND, GroupBars, HBars, Heatmap, LiveLine, ScoreDots, VerdictBars
 from . import online_learn
 from . import recall as R
+from .copilot import answer_with_ollama, list_ollama_models
+from .network_ai import NetworkTelemetry, assess_network_with_ollama, telemetry_digest
 from .paths import APP_ROOT as ROOT, DATA_ROOT as DATA, RESOURCE_ROOT
 from .spec import CLASS_LEVEL, CLASS_RU, CLASSES, LEVEL_RU, LEVELS
 
@@ -254,6 +261,10 @@ class MainWindow(QMainWindow):
         self._workers: list[Worker] = []
         self._last_ev: dict | None = None
         self._candidate_busy = False
+        self._copilot_worker: Worker | None = None
+        self._network_telemetry = NetworkTelemetry()
+        self._network_ai_busy = False
+        self._network_ai_next = time.monotonic() + 10
 
         central = QWidget()
         root = QHBoxLayout(central)
@@ -289,10 +300,11 @@ class MainWindow(QMainWindow):
                  ("Эталоны и версии", self._page_baselines()),
                  ("Журнал событий", self._page_events()), ("Полнота обнаружения", self._page_recall()),
                  ("Обучение и оценка", self._page_train()),
-                 ("Настройки", self._page_settings())]
+                 ("Настройки", self._page_settings()), ("ИИ-помощник", self._page_copilot())]
         for i, (name, page) in enumerate(pages):
-            if i in (0, 2, 4, 6):
-                section_names = {0: "РАБОЧЕЕ МЕСТО", 2: "УПРАВЛЕНИЕ", 4: "КАЧЕСТВО МОДЕЛИ", 6: "СИСТЕМА"}
+            if i in (0, 2, 4, 6, 7):
+                section_names = {0: "РАБОЧЕЕ МЕСТО", 2: "УПРАВЛЕНИЕ", 4: "КАЧЕСТВО МОДЕЛИ",
+                                 6: "СИСТЕМА", 7: "ПОМОЩНИК"}
                 sl.addWidget(label(section_names[i], "navSection"))
             b = QPushButton(name, objectName="nav", checkable=True)
             b.setCursor(Qt.PointingHandCursor)
@@ -663,6 +675,8 @@ class MainWindow(QMainWindow):
             self._load_events()
         elif name == "Полнота обнаружения":
             self._load_recall()
+        elif name == "ИИ-помощник":
+            self._copilot_refresh_models()
 
     def closeEvent(self, e):
         if getattr(self, "tray", None) and self.tray.isVisible() and not self._quitting:
@@ -679,6 +693,8 @@ class MainWindow(QMainWindow):
                 self.settings.sync()
             return
         busy = [w for w in self._workers if w.isRunning()]
+        if self._copilot_worker is not None and self._copilot_worker.isRunning():
+            busy.append(self._copilot_worker)
         if busy:
             box = QMessageBox(QMessageBox.Question, "IntegrityGuard", "Идёт фоновая задача (проверка или обучение). "
                               "Прервать её и закрыть программу?", QMessageBox.Yes | QMessageBox.No, self)
@@ -703,7 +719,8 @@ class MainWindow(QMainWindow):
                 ev = json.loads(line)
                 if isinstance(ev, dict) and ev.get("verdict") in VERDICT and "time" in ev \
                         and (isinstance(ev.get("score"), (int, float)) or
-                             ev.get("analysis_mode") in {"reference_missing", "intake_validation_error"}):
+                             ev.get("analysis_mode") in {"reference_missing", "intake_validation_error",
+                                                         "wheel_static", "wheel_validation_error"}):
                     out.append(ev)
             except json.JSONDecodeError:
                 continue                                  # повреждённая строка журнала пропускается
@@ -751,9 +768,9 @@ class MainWindow(QMainWindow):
         self.audit_note = label("", muted=True, wrap=True)
         self.audit_table = table(["Время", "Пакет", "Вердикт", "Тип угрозы", "Оценка"], 1)
         self.audit_table.setMinimumHeight(160)
-        attack_btn = QPushButton("Подтвердить: это угроза")
+        attack_btn = QPushButton("Разметить: угроза")
         attack_btn.clicked.connect(lambda: self._audit_confirm(True))
-        clean_btn = QPushButton("Подтвердить: ложное срабатывание")
+        clean_btn = QPushButton("Разметить: ложное срабатывание")
         clean_btn.clicked.connect(lambda: self._audit_confirm(False))
         audit_btns = QHBoxLayout()
         audit_btns.addWidget(attack_btn)
@@ -767,6 +784,24 @@ class MainWindow(QMainWindow):
         self.net_note = label("", muted=True)
         self.net_card = card(self.ch_net, self.net_note, title="Входящие сетевые пакеты")
         p.lay.addWidget(self.net_card)
+        self.net_ai_note = label(
+            "Локальная ИИ-оценка запустится автоматически по текущим сетевым метаданным и состоянию IntegrityGuard. "
+            "Оценка рекомендательная: пакетный payload не собирается, правила firewall модель не меняет.",
+            muted=True, wrap=True)
+        self.net_ai_note.setTextInteractionFlags(Qt.TextSelectableByMouse)
+        p.lay.addWidget(card(self.net_ai_note, title="ИИ-оценка сетевого трафика и функций программы"))
+        self.firewall_ip = QLineEdit()
+        self.firewall_ip.setPlaceholderText("Удалённый IPv4 или IPv6")
+        self.firewall_status = label("Действие подтверждает оператор.", wrap=True)
+        firewall_row = QHBoxLayout()
+        firewall_row.addWidget(self.firewall_ip, 1)
+        self.firewall_buttons = []
+        for action, title in (("Block", "Заблокировать IP"), ("Unblock", "Снять блокировку")):
+            button = QPushButton(title)
+            button.clicked.connect(lambda checked=False, value=action: self._change_network_block(value))
+            self.firewall_buttons.append(button)
+            firewall_row.addWidget(button)
+        p.lay.addWidget(card(firewall_row, self.firewall_status, title="Windows Firewall"))
         p.lay.addStretch(1)
         self.net_timer = QTimer(self)
         self.net_timer.timeout.connect(self._net_tick)
@@ -832,9 +867,11 @@ class MainWindow(QMainWindow):
         confirmed_n = online_learn.confirmed_count(DATA)
         self.audit_note.setText(
             f"Ждут подтверждения: {len(pending)}. Подтверждённых образцов для дообучения: {confirmed_n}. "
+            "Для учебной метки нужны документ, обоснование и согласованные решения двух учётных записей. "
             "Карантинные пакеты случайно отбираются на аудит. Подтверждённые примеры создают отдельного "
             "кандидата по расписанию: минимум 20 примеров, не менее 5 на каждый бинарный класс, "
-            "не чаще раза в сутки; обучение ограничено 500 примерами, 3 эпохами и 1 CPU-потоком. "
+            "не чаще раза в сутки; обучение ограничено 500 примерами и 3 эпохами, "
+            "использует отдельный процесс, до 4 CPU-потоков и доступную CUDA. "
             "Рабочая модель не меняется до независимой оценки.")
 
     def _audit_confirm(self, is_attack: bool):
@@ -845,7 +882,20 @@ class MainWindow(QMainWindow):
         item_id = self.audit_table.item(row, 0).data(Qt.UserRole)
         if not item_id:
             return
-        online_learn.confirm(DATA, item_id, is_attack)
+        evidence_path, _ = QFileDialog.getOpenFileName(self, "Выберите документ, подтверждающий метку")
+        if not evidence_path:
+            return
+        rationale, accepted = QInputDialog.getMultiLineText(
+            self, "Обоснование разметки", "Какие факты связывают документ, пакет и выбранную метку? Требуется проверка второй учётной записью.")
+        if not accepted:
+            return
+        try:
+            result = online_learn.confirm(DATA, item_id, is_attack, evidence_path=evidence_path, rationale=rationale)
+            if result and result.get("review_status"):
+                self.notify("Решение сохранено. Нужна согласованная независимая проверка; в обучение пример не добавлен.", "info")
+        except (ValueError, OSError) as error:
+            self.notify(str(error), "error")
+            return
         self._load_audit()
         self._maybe_run_scheduled_candidate()
 
@@ -869,12 +919,11 @@ class MainWindow(QMainWindow):
 
     def _finetune_online(self, _progress=None) -> str:
         """Scheduled bounded candidate training; never changes the active detector."""
-        import torch
         model_path = Path(self.cfg("model"))
-        ref_path = model_path.parent / "ref_val.pt"
-        ref_val = torch.load(ref_path, map_location="cpu", weights_only=True) if ref_path.exists() else None
         try:
-            candidate = online_learn.build_candidate(DATA, model_path, ref_val)
+            from .training_process import run_training_process
+            result = run_training_process(DATA, model_path)
+            candidate = result["candidate"]
             if not candidate:
                 online_learn.finish_candidate_schedule(DATA, "insufficient_data")
                 return "Кандидат не создан: не выполнены требования к подтверждённым данным."
@@ -887,6 +936,15 @@ class MainWindow(QMainWindow):
 
     def _net_tick(self):
         """Раз в секунду: обновление графиков при изменении журнала и новая точка графика сети."""
+        if hasattr(self, "label_coverage_table"):
+            registry_path = DATA / "label_registry.sqlite"
+            try:
+                signature = registry_path.stat().st_mtime_ns if registry_path.exists() else None
+                if signature != getattr(self, "_label_registry_signature", None):
+                    self._load_label_coverage()
+                    self._label_registry_signature = signature
+            except OSError:
+                pass
         f = Path(self.cfg("registry")) / "events.jsonl"
         try:
             sig = (f.stat().st_mtime if f.exists() else 0, self._queue())
@@ -897,6 +955,8 @@ class MainWindow(QMainWindow):
             self._load_monitor()
             self._load_events(keep_selection=True)        # «Журнал событий» тоже обновляется сам, без кнопки
         if self._psutil is None:
+            if hasattr(self, "net_ai_note"):
+                self.net_ai_note.setText("Сетевой сенсор psutil недоступен; модель не получает телеметрию и не выносит рекомендацию.")
             return
         try:
             io, now = self._psutil.net_io_counters(), time.monotonic()
@@ -913,6 +973,165 @@ class MainWindow(QMainWindow):
             self.net_note.setText(f"Сейчас: {rate:.0f} пак./с, {max(io.bytes_recv - b0, 0) / dt / 1024:.1f} КБ/с. "
                                   f"Обновление раз в секунду, окно 2 минуты.")
         self._net_prev = (io.packets_recv, io.bytes_recv, now)
+        self._maybe_network_ai_assessment(now)
+
+    def _maybe_network_ai_assessment(self, now: float | None = None):
+        if getattr(self, "_network_ai_paused", False) or self._network_ai_busy:
+            return
+        now = time.monotonic() if now is None else now
+        if now < self._network_ai_next:
+            return
+        # A slow local model cannot start overlapping scans. If a scan is still
+        # running, the next one is scheduled only after it completes.
+        self._network_ai_busy = True
+        self._network_ai_next = now + 60
+        model = str(self.settings.value("copilot_model", "qwen3.5:4b")).strip() or "qwen3.5:4b"
+        self.net_ai_note.setText("Ollama анализирует живые счётчики интерфейсов, текущие соединения и состояние функций IntegrityGuard…")
+
+        def work(_progress):
+            from .copilot_audit import CopilotAudit
+            from .copilot_tools import execute_tool
+
+            context = self._copilot_tool_context()
+            audit = CopilotAudit(DATA / "copilot_audit.sqlite")
+            snapshot = app_state = None
+            try:
+                context["network_snapshot"] = self._network_telemetry.sample(self._psutil)
+                snapshot = execute_tool("network_status", {}, context)
+                app_state = execute_tool("monitoring_status", {}, context)
+                assessment = assess_network_with_ollama(snapshot, app_state, model)
+                digest = telemetry_digest(snapshot, app_state, assessment)
+                assessment_json = json.dumps(assessment, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+                audit.append(
+                    principal=getpass.getuser(),
+                    question="periodic_network_assessment",
+                    answer=assessment_json,
+                    model=assessment["model"],
+                    status="insufficient_evidence" if assessment["insufficient_evidence"] else "answered",
+                    source_hashes=[digest],
+                    tool_calls=[{"name": "network_ai_assessment", "status": assessment["decision"],
+                                 "result_sha256": hashlib.sha256(assessment_json.encode("utf-8")).hexdigest()}],
+                )
+                return snapshot, app_state, assessment
+            except Exception as error:
+                hashes = [telemetry_digest(snapshot, app_state, None)] if snapshot is not None and app_state is not None else []
+                audit.append(
+                    principal=getpass.getuser(), question="periodic_network_assessment",
+                    answer=f"{type(error).__name__}: local network assessment failed",
+                    model=model, status="error", source_hashes=hashes,
+                    tool_calls=[{"name": "network_ai_assessment", "status": "error",
+                                 "result_sha256": hashlib.sha256(type(error).__name__.encode("utf-8")).hexdigest()}],
+                )
+                raise
+
+        def done(result):
+            snapshot, app_state, assessment = result
+            labels = {"ALLOW": "ЯВНАЯ АТАКА НЕ УСТАНОВЛЕНА", "REVIEW": "НУЖНА ПРОВЕРКА",
+                      "BLOCK": "РЕКОМЕНДАЦИЯ: БЛОКИРОВАТЬ"}
+            note = (f"{labels[assessment['decision']]} · модель {assessment['model']} · "
+                    f"соединений: {snapshot['active_connection_count']}, удалённых endpoint: "
+                    f"{snapshot['remote_endpoint_count']} · {snapshot['observed_at_utc']}\n"
+                    f"{assessment['summary']}\n"
+                    "Эта оценка Ollama не применяет правила Windows Firewall. "
+                    "Сенсор видит счётчики и метаданные соединений, не payload пакетов.")
+            if assessment["model_decision"] != assessment["decision"]:
+                note += f"\nИсходная оценка Ollama: {assessment['model_decision']}."
+            if assessment["evidence_ids"]:
+                note += "\nОснования оценки (ID): " + ", ".join(assessment["evidence_ids"])
+            intel = snapshot.get("threat_intelligence", {})
+            if isinstance(intel, dict):
+                match_count = len(intel.get("matches", []))
+                note += (f"\nПубличный источник {intel.get('source', 'DShield')}: "
+                         f"{match_count} совпадений, статус {intel.get('status', 'unknown')}; "
+                         f"снимок {intel.get('checked_at_utc') or 'не получен'}. "
+                         "Совпадение даёт контекст и само по себе не доказывает атаку.")
+            if not snapshot["connection_table_query_succeeded"] or not snapshot["interface_counters_available"]:
+                note += " Системный запрос телеметрии неполон или недоступен."
+            self.net_ai_note.setText(note)
+            self._network_ai_busy = False
+            self._network_ai_next = time.monotonic() + 60
+
+        def failed(message):
+            self.net_ai_note.setText(
+                f"ИИ-оценка сейчас недоступна: {message}. Сбор счётчиков продолжает работать; рекомендация не вынесена.")
+            self._network_ai_busy = False
+            self._network_ai_next = time.monotonic() + 300
+
+        worker = Worker(work, self)
+        worker.done.connect(done)
+        worker.fail.connect(failed)
+
+        def finish():
+            self._network_ai_busy = False
+            if worker in self._workers:
+                self._workers.remove(worker)
+
+        worker.finished.connect(finish)
+        self._workers.append(worker)
+        worker.start()
+
+    def _change_network_block(self, action):
+        try:
+            address = ipaddress.ip_address(self.firewall_ip.text().strip())
+            if address.is_unspecified or address.is_loopback or address.is_multicast or getattr(address, 'scope_id', None):
+                raise ValueError
+        except ValueError:
+            self.firewall_status.setText("Укажите один удалённый IP-адрес.")
+            return
+        if sys.platform != "win32":
+            self.firewall_status.setText("Управление Windows Firewall доступно в Windows.")
+            return
+        import ctypes
+        if not ctypes.windll.shell32.IsUserAnAdmin():
+            self.firewall_status.setText("Для изменения правил запустите IntegrityGuard от имени администратора.")
+            return
+        address = str(address)
+        title = "Заблокировать" if action == "Block" else "Разблокировать"
+        if QMessageBox.question(self, "Windows Firewall", f"{title} входящий и исходящий трафик для {address}?") != QMessageBox.StandardButton.Yes:
+            return
+        for button in self.firewall_buttons:
+            button.setEnabled(False)
+        self.firewall_status.setText("Изменяю правила Windows Firewall…")
+
+        def work(_progress):
+            from .copilot_audit import CopilotAudit
+            audit = CopilotAudit(DATA / "copilot_audit.sqlite")
+            request = f"{action} {address} {uuid.uuid4()}"
+            principal = getpass.getuser()
+            audit.append(principal=principal, question=request, answer="requested", model="operator",
+                         status="answered", source_hashes=[], tool_calls=[
+                             {"name": f"firewall_{action.lower()}", "status": "requested",
+                              "result_sha256": hashlib.sha256(request.encode()).hexdigest()}])
+            try:
+                system = Path(os.environ.get("SystemRoot", r"C:\Windows"))
+                powershell = system / "System32/WindowsPowerShell/v1.0/powershell.exe"
+                subprocess.run([str(powershell), "-NoProfile", "-NonInteractive", "-File",
+                                str(RESOURCE_ROOT / "tools/network-block.ps1"), "-Action", action,
+                                "-Address", address], check=True, capture_output=True,
+                               creationflags=subprocess.CREATE_NO_WINDOW, timeout=60)
+            except (OSError, subprocess.SubprocessError) as error:
+                result = type(error).__name__
+                message = f"Windows Firewall вернул ошибку ({result}). Проверьте правила для {address}."
+                status = "error"
+            else:
+                result, status = "success", "answered"
+                message = f"{address}: {'правила блокировки добавлены' if action == 'Block' else 'правила IntegrityGuard сняты'}."
+            audit.append(principal=principal, question=request, answer=result, model="operator", status=status,
+                         source_hashes=[], tool_calls=[{"name": f"firewall_{action.lower()}", "status": result,
+                         "result_sha256": hashlib.sha256(f"{request} {result}".encode()).hexdigest()}])
+            return message
+
+        worker = self.run_bg(work, self.firewall_status.setText)
+        worker.fail.connect(self.firewall_status.setText)
+        worker.finished.connect(lambda: [button.setEnabled(True) for button in self.firewall_buttons])
+
+    def _copilot_tool_context(self) -> dict:
+        from .copilot_tools import COPILOT_READ_CAPABILITIES
+        return {"principal": getpass.getuser(), "data_root": DATA, "incoming": self.incoming,
+                "processed": self.processed, "registry": Path(self.cfg("registry")),
+                "detector": Path(self.cfg("model")), "auto_enabled": self.auto_on(),
+                "network_intel_enabled": True,
+                "capabilities": sorted(COPILOT_READ_CAPABILITIES)}
 
     def run_bg(self, fn, done, button=None, progress=None, silent=False):
         w = Worker(fn, self)
@@ -1767,6 +1986,12 @@ class MainWindow(QMainWindow):
         row.addWidget(self.t_abl)
         row.addStretch(1)
         p.lay.addWidget(card(g, row, self.t_bar, self.t_note, title="Новый цикл обучения"))
+        self.label_coverage_note = label("", muted=True, wrap=True)
+        self.label_coverage_table = table(["Класс", "Предложено", "Подтверждено", "Оценка качества"], 0)
+        self.label_coverage_table.setMinimumHeight(310)
+        p.lay.addWidget(card(self.label_coverage_note, self.label_coverage_table,
+                             title="Покрытие классов реальными свидетельствами"))
+        self._load_label_coverage()
         self.t_log = QPlainTextEdit(readOnly=True)
         self.t_log.setFixedHeight(150)
         self.t_log_card = card(self.t_log, title="Ход обучения")
@@ -1820,6 +2045,25 @@ class MainWindow(QMainWindow):
         p.lay.addStretch(1)
         self._load_metrics()
         return p
+
+    def _load_label_coverage(self):
+        from .label_registry import LabelRegistry
+        try:
+            coverage = LabelRegistry(DATA / "label_registry.sqlite").coverage()
+        except Exception as error:
+            self.label_coverage_table.setRowCount(0)
+            self.label_coverage_note.setText(f"Не удалось прочитать реестр разметки: {error}")
+            return
+        self.label_coverage_table.setSortingEnabled(False)
+        self.label_coverage_table.setRowCount(0)
+        for name in CLASSES:
+            row = coverage["classes"][name]
+            add_row(self.label_coverage_table, [CLASS_RU[name], str(row["proposed_cases"]),
+                                              str(row["verified_cases"]), "не оценена"])
+        self.label_coverage_note.setText(
+            f"Карточек: {coverage['cases']}; инцидентов: {coverage['incidents']}. "
+            "Предложенная метка не является подтверждённой. Свидетельства инцидента "
+            "не заменяют проверенные артефакты и обучающие признаки.")
 
     def _refresh_candidate_options(self):
         if not hasattr(self, "candidate_eval_box"):
@@ -1967,6 +2211,148 @@ class MainWindow(QMainWindow):
     def _train(self):
         self.notify("Обучение не запущено: синтетические примеры не используются для эксплуатационной модели. "
                     "Сначала требуется корпус реальных пакетов с проверенной разметкой и происхождением.", "warn")
+
+    # ------------------------------------------------------------ страница «Настройки»
+    def _page_copilot(self):
+        p = Page("ИИ-помощник сети", "Локальная модель анализирует текущую сетевую телеметрию и read-only состояние функций IntegrityGuard. Документы и файлы помощником не читаются.")
+        self.cp_status = label(
+            "Ollama получает только агрегированные сетевые счётчики, метаданные соединений и безопасную сводку приложения. Пакеты не захватываются; firewall не меняется.",
+            muted=True, wrap=True)
+        self.cp_status.setObjectName("copilot_status")
+        p.lay.addWidget(card(self.cp_status, title="Состояние помощника"))
+
+        self.cp_question = QLineEdit(placeholderText="Например: оцени текущий трафик и проверь состояние IntegrityGuard")
+        self.cp_question.returnPressed.connect(self._copilot_search)
+        self.cp_model = QComboBox()
+        self.cp_model.setEditable(True)
+        self.cp_model.setInsertPolicy(QComboBox.NoInsert)
+        self.cp_model.lineEdit().setPlaceholderText("Локальная модель Ollama, например qwen3.5:4b")
+        self.cp_model.setEditText(str(self.settings.value("copilot_model", "qwen3.5:4b")))
+        self.cp_search = QPushButton("Оценить сеть / состояние приложения", objectName="primary")
+        self.cp_search.clicked.connect(self._copilot_search)
+        self.cp_refresh = QPushButton("Обновить модели")
+        self.cp_refresh.clicked.connect(self._copilot_refresh_models)
+        self.cp_results = QPlainTextEdit(readOnly=True)
+        self.cp_results.setPlaceholderText("Рекомендация по живым сетевым метаданным или данные read-only функций IntegrityGuard появятся здесь.")
+        self.cp_results.setMinimumHeight(300)
+        model_row = QHBoxLayout()
+        model_row.addWidget(self.cp_model, 1)
+        model_row.addWidget(self.cp_refresh)
+        p.lay.addWidget(card(self.cp_question, model_row, self.cp_search, title="Сетевой запрос"))
+        p.lay.addWidget(card(self.cp_results, title="Результат мониторинга"))
+        p.lay.addStretch(1)
+        return p
+
+    def _copilot_search(self):
+        if self._copilot_worker is not None and self._copilot_worker.isRunning():
+            return
+        query = self.cp_question.text().strip()
+        if not query:
+            self.notify("Введите запрос о сети или состоянии IntegrityGuard.", "warn")
+            return
+        self.cp_results.setPlainText("Получаю текущую сетевую телеметрию и read-only состояние функций IntegrityGuard.")
+        model = self.cp_model.currentText().strip()
+        if model:
+            self.settings.setValue("copilot_model", model)
+            self.settings.sync()
+
+        from .copilot_audit import CopilotAudit
+        principal = getpass.getuser()
+        tool_context = self._copilot_tool_context()
+        audit = CopilotAudit(DATA / "copilot_audit.sqlite")
+
+        def work(_progress):
+            try:
+                try:
+                    answer = answer_with_ollama(query, model, tool_context=tool_context) if model else None
+                    warning = None
+                except Exception as error:
+                    answer = None
+                    warning = f"{type(error).__name__}: {str(error)[:400]}"
+                if answer is None:
+                    warning = warning or "Не выбрана локальная модель Ollama."
+                    output, status, audit_model, calls = warning, "error", "unconfigured", []
+                else:
+                    output = answer["answer"]
+                    status = "insufficient_evidence" if answer["insufficient_evidence"] else "answered"
+                    audit_model = answer["model"]
+                    calls = answer.get("tool_calls", [])
+                audit.append(principal=principal, question=query, answer=output, model=audit_model,
+                             status=status, source_hashes=[], tool_calls=calls)
+                return answer, warning
+            except Exception as error:
+                audit.append(principal=principal, question=query,
+                             answer=f"{type(error).__name__}: {str(error)[:500]}",
+                             model=model or "unconfigured", status="error",
+                             source_hashes=[], tool_calls=[])
+                raise
+
+        def done(result):
+            answer, warning = result
+            blocks = []
+            if warning:
+                blocks.append(warning)
+            if answer is not None:
+                if answer["insufficient_evidence"]:
+                    blocks.append("Запрос вне поддерживаемого сетевого/операционного охвата или данных недостаточно.")
+                blocks.append(f"ИИ ({answer['model']}):\n{answer['answer']}")
+                for item in answer.get("tool_results", []):
+                    blocks.append(f"\nДанные IntegrityGuard [{item['citation_id']}] (read-only):\n"
+                                  f"{json.dumps(item['data'], ensure_ascii=False, indent=2)}")
+            blocks.append("\nПомощник не читает пользовательские документы и содержимое файлов. "
+                          "Захвата packet payload нет; вывод модели не меняет Windows Firewall. "
+                          "Хеши запросов и вызовов записываются в локальный hash-chain аудит.")
+            self.cp_results.setPlainText("\n\n".join(blocks))
+
+        worker = Worker(work, self)
+        self._copilot_worker = worker
+        self.cp_search.setEnabled(False)
+        worker.done.connect(done)
+        worker.fail.connect(lambda msg: self.notify(msg, "error"))
+
+        def finish():
+            self.cp_search.setEnabled(True)
+            self._copilot_worker = None
+            if worker in self._workers:
+                self._workers.remove(worker)
+
+        worker.finished.connect(finish)
+        self._workers.append(worker)
+        worker.start()
+
+    def _copilot_refresh_models(self):
+        if self._copilot_worker is not None and self._copilot_worker.isRunning():
+            return
+        selected = self.cp_model.currentText().strip()
+        self.cp_refresh.setEnabled(False)
+
+        def done(names):
+            self.cp_model.clear()
+            self.cp_model.addItems(names)
+            if selected:
+                self.cp_model.setEditText(selected)
+            elif names:
+                preferred = next((n for n in names if n.startswith("qwen3.5:4b")), names[0])
+                self.cp_model.setCurrentText(preferred)
+            self.cp_status.setText(
+                f"Ollama отвечает на локальном адресе. Найдено моделей: {len(names)}. "
+                "Модель получает только телеметрию сети и read-only состояние приложения.")
+
+        worker = Worker(lambda _progress: list_ollama_models(), self)
+        self._copilot_worker = worker
+        worker.done.connect(done)
+        worker.fail.connect(lambda msg: self.cp_status.setText(
+            f"Ollama пока не обнаружена: {msg}. Проверка сети недоступна до запуска локальной модели."))
+
+        def finish():
+            self.cp_refresh.setEnabled(True)
+            self._copilot_worker = None
+            if worker in self._workers:
+                self._workers.remove(worker)
+
+        worker.finished.connect(finish)
+        self._workers.append(worker)
+        worker.start()
 
     # ------------------------------------------------------------ страница «Настройки»
     def _page_settings(self):

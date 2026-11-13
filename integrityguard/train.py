@@ -166,7 +166,8 @@ def train_detector(train, val, epochs=70, lr=2e-3, hidden=64, use=(True, True, T
     return model.eval()
 
 
-def finetune_binary(model, confirmed, ref_val=None, epochs=3, lr=3e-4, fpr=0.02, log=None):
+def finetune_binary(model, confirmed, ref_val=None, epochs=3, lr=3e-4, fpr=0.02, log=None,
+                    device="cpu"):
     """Дообучение уже обученной модели на подтверждённых человеком реальных образцах.
 
     confirmed — список словарей признаков (x/adj/layers/behav) с полем bin_y
@@ -182,6 +183,7 @@ def finetune_binary(model, confirmed, ref_val=None, epochs=3, lr=3e-4, fpr=0.02,
     """
     if not confirmed:
         return model, None
+    model.to(device)
     model.train()
     opt = torch.optim.AdamW(model.parameters(), lr=lr, weight_decay=1e-3)
     ref = list(ref_val or [])
@@ -191,12 +193,13 @@ def finetune_binary(model, confirmed, ref_val=None, epochs=3, lr=3e-4, fpr=0.02,
         if aux:
             take = min(len(aux), max(4, len(confirmed)))
             batch = batch + list(np.random.default_rng(ep).choice(aux, take, replace=False))
-        b = collate(batch)
+        b = {key: value.to(device) for key, value in collate(batch).items()}
         out = model(b)
         probs = F.softmax(out["logits"], -1)
         score = (1 - probs[:, 0]).clamp(1e-6, 1 - 1e-6)
         target = torch.tensor(
-            [float(s["bin_y"]) if "bin_y" in s else float(s.get("y", 0) != 0) for s in batch]
+            [float(s["bin_y"]) if "bin_y" in s else float(s.get("y", 0) != 0) for s in batch],
+            device=device
         )
         loss = F.binary_cross_entropy(score, target)
         opt.zero_grad()
@@ -205,7 +208,7 @@ def finetune_binary(model, confirmed, ref_val=None, epochs=3, lr=3e-4, fpr=0.02,
         opt.step()
         if log:
             log(f"  дообучение (реальные данные), шаг {ep + 1}: loss {loss.item():.4f}")
-    model.eval()
+    model.cpu().eval()
     thr = calibrate(model, ref, fpr) if ref else None
     return model, thr
 

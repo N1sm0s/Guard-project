@@ -191,23 +191,30 @@ def inspect_wheel(path: str | Path) -> dict:
 
 
 def register_wheel_baseline(wheel_path: str | Path, registry: str | Path, *, source_url: str,
-                            provenance_ref: str) -> dict:
+                            provenance_ref: str, verify_pypi: bool = False) -> dict:
     """Pin one exact real wheel with its artifact hash and source provenance."""
     if not source_url or not provenance_ref:
         raise ValueError("Доверенный эталон требует source_url и provenance_ref")
     facts = inspect_wheel(wheel_path)
     if not facts["record"]["complete"]:
         raise ValueError("Wheel с неполным или несовпадающим RECORD нельзя регистрировать как эталон")
+    from .provenance import file_sha256, verify_pypi_wheel
+    verification = (verify_pypi_wheel(wheel_path, facts) if verify_pypi else
+                    {"status": "operator_supplied", "publisher_signature_verified": False})
     root = Path(registry) / "wheel_baselines" / facts["normalized_name"]
     root.mkdir(parents=True, exist_ok=True)
     wheel_name = f"{facts['version']}_{facts['sha256'][:16]}.whl"
     target = root / wheel_name
     temp_target = target.with_suffix(target.suffix + ".tmp")
     shutil.copyfile(facts["path"], temp_target)
+    if file_sha256(temp_target) != facts["sha256"]:
+        temp_target.unlink(missing_ok=True)
+        raise ValueError("Wheel изменился во время регистрации эталона")
     os.replace(temp_target, target)
     manifest = {key: facts[key] for key in ("name", "normalized_name", "version", "sha256", "file_count",
                                               "uncompressed_bytes", "files", "record", "requirements")}
     manifest.update({"format": "integrityguard-wheel-baseline-v1", "source_url": source_url,
+                     "source_verification": verification,
                      "provenance_ref": provenance_ref, "registered_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
                      "wheel_file": wheel_name})
     meta_path = root / f"{facts['sha256']}.json"
@@ -297,6 +304,7 @@ def assess_wheel(wheel_path: str | Path, registry: str | Path) -> dict:
                  "static_scan_complete", "findings")},
             "wheel_delta": {"changed": changed[:500], "added": added[:500], "removed": removed[:500]},
             "source_url": baseline.get("source_url") if baseline else None,
+            "baseline_source_verification": baseline.get("source_verification", {"status": "not_recorded"}) if baseline else None,
             "provenance_ref": baseline.get("provenance_ref") if baseline else None,
             "timing_ms": {"total": round(1000 * (_time.perf_counter() - started), 1)}}
 
