@@ -191,16 +191,26 @@ def inspect_wheel(path: str | Path) -> dict:
 
 
 def register_wheel_baseline(wheel_path: str | Path, registry: str | Path, *, source_url: str,
-                            provenance_ref: str, verify_pypi: bool = False) -> dict:
-    """Pin one exact real wheel with its artifact hash and source provenance."""
+                            provenance_ref: str, verify_pypi: bool = False,
+                            verification: dict | None = None) -> dict:
+    """Pin one exact real wheel with its artifact hash and source provenance.
+
+    ``verification`` lets a caller that already verified the artifact (for
+    example the managed acceptance flow) record that result instead of asking
+    PyPI again. It must be a result produced for this exact file.
+    """
     if not source_url or not provenance_ref:
         raise ValueError("Доверенный эталон требует source_url и provenance_ref")
     facts = inspect_wheel(wheel_path)
     if not facts["record"]["complete"]:
         raise ValueError("Wheel с неполным или несовпадающим RECORD нельзя регистрировать как эталон")
     from .provenance import file_sha256, verify_pypi_wheel
-    verification = (verify_pypi_wheel(wheel_path, facts) if verify_pypi else
-                    {"status": "operator_supplied", "publisher_signature_verified": False})
+    if verification is not None:
+        if verification.get("artifact_sha256") != facts["sha256"]:
+            raise ValueError("Подтверждение относится к другому файлу")
+    else:
+        verification = (verify_pypi_wheel(wheel_path, facts) if verify_pypi else
+                        {"status": "operator_supplied", "publisher_signature_verified": False})
     root = Path(registry) / "wheel_baselines" / facts["normalized_name"]
     root.mkdir(parents=True, exist_ok=True)
     wheel_name = f"{facts['version']}_{facts['sha256'][:16]}.whl"
