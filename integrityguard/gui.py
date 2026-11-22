@@ -1893,6 +1893,8 @@ class MainWindow(QMainWindow):
         self.b_adv_toggle.clicked.connect(self._toggle_b_adv)
         p.lay.addWidget(card(self.b_adv_toggle, b_adv_body))
 
+        p.lay.addWidget(self._build_wheel_accept_card())
+
         self.b_table = table(["Пакет", "Версия эталона", "Зависимостей", "Контрольный набор", "Проверок"])
         self.b_table.setMinimumHeight(150)
         self.b_table.itemSelectionChanged.connect(self._load_history)
@@ -1974,6 +1976,132 @@ class MainWindow(QMainWindow):
             self._refresh_status()
             prefix = "Пакет подписан ключом реестра. " if signed_now else ""
             self.notify(f"Эталон пакета «{name}» зарегистрирован. {prefix}SBOM сохранён: {sbom_path}\n{summary}", "ok")
+
+        self.run_bg(job, done, btn)
+
+    # ------------------------------------------------------------ принятие wheel-эталона (P1)
+    def _build_wheel_accept_card(self):
+        self._wheel_proposal = None
+        self.w_file = PathEdit("Файл wheel (.whl) — реальный файл с PyPI", False, "Wheel (*.whl)")
+        self.w_source = QLineEdit()
+        self.w_source.setPlaceholderText("Страница пакета на PyPI, например https://pypi.org/project/имя/")
+        self.w_prov = QLineEdit()
+        self.w_prov.setPlaceholderText("Основание: ссылка на запись PyPI или другой реестр")
+        self.w_operator = QLineEdit()
+        self.w_operator.setPlaceholderText("Ваше имя или логин — попадает в журнал решений")
+        self.w_check = QPushButton("Проверить по PyPI", objectName="primary")
+        self.w_check.setMinimumHeight(36)
+        self.w_check.clicked.connect(lambda: self._wheel_propose(self.w_check))
+        self.w_result = label("Проверка не выполнялась. Пока файл не проверен, доверие не выдаётся.",
+                              muted=True, wrap=True)
+        self.w_result.setTextInteractionFlags(Qt.TextSelectableByMouse)
+        self.w_replace = QCheckBox("Заменить эталон другой версии этого пакета")
+        self.w_replace.hide()
+        self.w_accept = QPushButton("Принять эталон", objectName="primary")
+        self.w_accept.setEnabled(False)
+        self.w_accept.clicked.connect(lambda: self._wheel_decide("accept", self.w_accept))
+        self.w_reject = QPushButton("Отклонить")
+        self.w_reject.setEnabled(False)
+        self.w_reject.clicked.connect(lambda: self._wheel_decide("reject", self.w_reject))
+        self.w_file.picked.connect(self._wheel_reset)
+        self.w_source.textChanged.connect(self._wheel_reset)
+        self.w_prov.textChanged.connect(self._wheel_reset)
+        g = QGridLayout()
+        g.setVerticalSpacing(10)
+        g.setHorizontalSpacing(12)
+        for i, (name, w) in enumerate((("Файл", self.w_file), ("Источник", self.w_source),
+                                       ("Основание", self.w_prov), ("Оператор", self.w_operator))):
+            g.addWidget(label(name, muted=True), i, 0)
+            g.addWidget(w, i, 1)
+        buttons = QHBoxLayout()
+        buttons.addWidget(self.w_check)
+        buttons.addStretch(1)
+        buttons.addWidget(self.w_reject)
+        buttons.addWidget(self.w_accept)
+        body = QVBoxLayout()
+        body.addLayout(g)
+        body.addLayout(buttons)
+        body.addWidget(self.w_result)
+        body.addWidget(self.w_replace)
+        note = label("Эталон принимается только если PyPI подтвердил точный файл по SHA-256. "
+                     "Решение и причины отказа записываются в журнал с цепочкой хешей.", muted=True, wrap=True)
+        body.addWidget(note)
+        return card(body, title="Принять wheel-эталон по PyPI")
+
+    def _wheel_reset(self, *_):
+        self._wheel_proposal = None
+        self.w_accept.setEnabled(False)
+        self.w_reject.setEnabled(False)
+        self.w_replace.hide()
+        self.w_replace.setChecked(False)
+        self.w_result.setText("Проверка не выполнялась или входные данные изменились. Нужна новая проверка.")
+
+    def _wheel_propose(self, btn):
+        wheel = self.w_file.text().strip()
+        source, prov = self.w_source.text().strip(), self.w_prov.text().strip()
+        if not wheel or not wheel.lower().endswith(".whl"):
+            self.notify("Выберите файл wheel (.whl).", "warn")
+            return
+        if not source or not prov:
+            self.notify("Укажите источник (страница PyPI) и основание.", "warn")
+            return
+        registry = Path(self.cfg("registry"))
+
+        def job(_):
+            from .baseline_acceptance import propose
+            return propose(wheel, registry, source_url=source, provenance_ref=prov)
+
+        def done(proposal):
+            self._wheel_proposal = proposal
+            self._wheel_show(proposal)
+
+        self.run_bg(job, done, btn)
+
+    def _wheel_show(self, p):
+        lines = [f"Пакет: {p['name']} {p['version']}",
+                 f"SHA-256 файла: {p['artifact_sha256']}"]
+        verification = p.get("verification")
+        if verification:
+            lines.append(f"PyPI подтвердил точный файл (метаданные SHA-256 {verification['metadata_sha256'][:16]}…, "
+                         f"загружен {verification.get('uploaded_at') or 'дата не указана'}).")
+        for reason in p.get("reasons", []):
+            lines.append("Причина: " + reason)
+        if p.get("replaces_versions"):
+            lines.append("Заменит эталоны версий: " + ", ".join(p["replaces_versions"]))
+        lines.append(p.get("meaning", ""))
+        self.w_result.setText("\n".join(line for line in lines if line))
+        self.w_accept.setEnabled(bool(p.get("can_accept")))
+        self.w_reject.setEnabled(True)
+        self.w_replace.setVisible(bool(p.get("replaces_versions")))
+        self.w_replace.setChecked(False)
+        self.w_accept.setToolTip("" if p.get("can_accept") else "Эталон нельзя принять: см. причины выше")
+
+    def _wheel_decide(self, decision, btn):
+        p = self._wheel_proposal
+        wheel = self.w_file.text().strip()
+        operator = self.w_operator.text().strip()
+        if p is None:
+            self.notify("Сначала выполните проверку по PyPI.", "warn")
+            return
+        if not operator:
+            self.notify("Укажите оператора: кто принимает решение.", "warn")
+            return
+        replace = self.w_replace.isChecked()
+        registry = Path(self.cfg("registry"))
+
+        def job(_):
+            from .baseline_acceptance import accept
+            return accept(p, wheel, registry, operator=operator, decision=decision,
+                          replace_existing=replace)
+
+        def done(manifest):
+            self._wheel_reset()
+            if decision == "accept" and manifest:
+                self._load_baselines()
+                self.notify(f"Эталон принят: {manifest['name']} {manifest['version']}. "
+                            "Решение записано в журнал.", "ok")
+            else:
+                self.notify("Решение «отклонить» записано в журнал. Эталон не создан.", "info")
 
         self.run_bg(job, done, btn)
 
