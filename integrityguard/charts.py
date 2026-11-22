@@ -547,8 +547,11 @@ class NNScoreStream(Chart):
                 f = self.flows[i]
                 udp_tag = " [UDP]" if f.get("is_udp") else ""
                 completion = f.get("completion_reason")
-                completion_tag = "\nЗавершение: тайм-аут бездействия 1 с" \
-                    if completion == "udp_idle_timeout_1s" else ""
+                completion_tag = {
+                    "udp_idle_timeout_1s": "\nЗавершение: тайм-аут бездействия 1 с",
+                    "icmp_idle_timeout_1s": "\nЗавершение: ICMP, тайм-аут бездействия 1 с",
+                    "tcp_half_open_idle_1s": "\nЗавершение: полуоткрытый TCP (только SYN), тайм-аут 1 с",
+                }.get(completion, "")
                 QToolTip.showText(e.globalPosition().toPoint(),
                                   f"Поток #{i + 1}{udp_tag}\nP(атака) = {f['score']:.4f}\n"
                                   f"Статус кандидата: {f.get('verdict', '?')}{completion_tag}",

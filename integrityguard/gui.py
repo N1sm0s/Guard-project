@@ -2780,10 +2780,10 @@ class MainWindow(QMainWindow):
             ("Есть отдельные validation и test захваты", source_test_ready),
             ("Per-flow модель подключена к Pktmon; есть успешный реальный сегмент",
              runtime_flow_ready),
-            ("По каждому test-захвату нижняя CI recall ≥80%, верхняя CI FPR ≤0,25%",
+            ("По каждому test-захвату нижняя CI recall ≥80%, верхняя CI FPR ≤0,1%",
              capture_quality_ready),
             ("Проведён отдельный размеченный test на целевой сети", target_test_ready),
-            ("Целевая выборка: ≥100 атак и достаточная benign-поддержка для верхней CI FPR ≤0,25%",
+            ("Целевая выборка: ≥100 атак и достаточная benign-поддержка для верхней CI FPR ≤0,1%",
              target_fpr_ready),
             ("Измерены потери сенсора; packet-drop rate ≤0,1%", sensor_completeness_ready),
             ("P95 inference ≤100 мс на целевой нагрузке", latency_ready),
@@ -2815,10 +2815,10 @@ class MainWindow(QMainWindow):
                         f"(верхняя 95% CI {float(fpr_ci[1]):.3%})")
         gate_lines.extend((
             "Порог стабильности заранее задан для каждого захвата: нижняя 95% CI полноты ≥80%, "
-            "верхняя двусторонняя 95% Wilson CI ложных срабатываний ≤0,25%.",
+            "верхняя двусторонняя 95% Wilson CI ложных срабатываний ≤0,1%.",
             "Для target-test требуется не менее 100 атак и достаточная benign-поддержка; неизвестные потоки "
-            "остаются без метки и не входят в оценку. CI пересчитываются из TP/FP/FN/TN. Для FPR ≤0,25% "
-            "при нуле ложных срабатываний нужно минимум 1 533 benign-потока (95% Wilson); при FP нужно больше.",
+            "остаются без метки и не входят в оценку. CI пересчитываются из TP/FP/FN/TN. Для FPR ≤0,1% "
+            "при нуле ложных срабатываний нужно минимум 3 838 benign-потоков (95% Wilson); при FP нужно больше.",
         ))
         gate_status = label("\n".join(gate_lines), muted=True, wrap=True)
         observed_p95 = runtime.get("p95_inference_ms")
