@@ -17,6 +17,9 @@ from .network_flow_schema_v11 import from_live_flows as from_live_flows_v11
 _MAX_CAPTURE_BYTES = 128 * 1024 * 1024
 _MAX_FLOWS = 250_000
 _UDP_IDLE_TIMEOUT_SECONDS = 1.0
+# ICMP has no close handshake and a SYN-flood flow never sends FIN/RST, so the
+# same verified-idle rule as UDP is used to close them inside a segment.
+_IDLE_TIMEOUT_SECONDS = _UDP_IDLE_TIMEOUT_SECONDS
 
 
 class CaptureFormatError(ValueError):
@@ -216,16 +219,29 @@ def aggregate_capture(path: Path, *, capture_end_timestamp: float | None = None)
     """Aggregate packet headers into bidirectional flow records with completeness.
 
     TCP completion requires an observed SYN followed by FIN/RST. For live
-    Pktmon segments, UDP is treated as an idle-closed observation only when
-    its last packet precedes the verified capture stop by the idle timeout.
-    Offline callers without a capture end timestamp keep UDP incomplete.
+    Pktmon segments, UDP and ICMP flows are treated as idle-closed observations
+    only when their last packet precedes the verified capture stop by the idle
+    timeout. A half-open TCP flow (the originator sent only SYN packets,
+    including retransmissions, and never an ACK or data, e.g. a SYN flood or an
+    unanswered connection attempt) is closed by the same idle rule. Offline callers without a capture end timestamp keep these incomplete.
+    """
+    return aggregate_packets(lambda: _read_capture(path),
+                             capture_end_timestamp=capture_end_timestamp)
+
+
+def aggregate_packets(packet_source, *, capture_end_timestamp: float | None = None) -> dict:
+    """Aggregate an iterable of (timestamp, linktype, frame, original_length).
+
+    ``packet_source`` is a zero-argument callable returning the packet
+    iterator, so reader errors are reported the same way as for files. This is
+    the single aggregation used by live Pktmon segments and offline ingestion.
     """
     flows = OrderedDict()
     counts = {"packets": 0, "parsed": 0, "non_ip_frames": 0,
               "unsupported_or_truncated": 0,
               "flow_limit_reached": False}
     try:
-        packets = _read_capture(path)
+        packets = packet_source()
         for timestamp, linktype, frame, original_length in packets:
             counts["packets"] += 1
             decoded = _decode_packet(frame, linktype, original_length)
@@ -252,9 +268,12 @@ def aggregate_capture(path: Path, *, capture_end_timestamp: float | None = None)
                         "responder_ip": destination[0], "saw_syn": False,
                         "saw_syn_ack": False, "saw_ack": False,
                         "saw_fin": False, "saw_rst": False,
-                        "saw_fin_or_rst": False}
+                        "saw_fin_or_rst": False, "originator_non_syn_packets": 0}
                 flows[key] = flow
             direction = "a" if source == endpoint_a else "b"
+            if (source == (flow["originator_ip"], flow["originator_port"])
+                    and not (protocol == "tcp" and tcp_flags & 0x02)):
+                flow["originator_non_syn_packets"] += 1
             flow["total_packets"] += 1
             flow["total_bytes"] += ip_bytes
             flow[f"direction_{direction}_bytes"] += ip_bytes
@@ -277,12 +296,19 @@ def aggregate_capture(path: Path, *, capture_end_timestamp: float | None = None)
 
     records = []
     for flow in flows.values():
+        idle = (capture_end_timestamp is not None
+                and capture_end_timestamp - flow["last_seen"] >= _IDLE_TIMEOUT_SECONDS)
         complete = (flow["protocol"] == "tcp" and flow["saw_syn"] and flow["saw_fin_or_rst"])
         completion_reason = "tcp_fin_or_rst_after_syn" if complete else "incomplete"
+        if (not complete and flow["protocol"] == "tcp" and flow["saw_syn"]
+                and flow["originator_non_syn_packets"] == 0 and idle):
+            complete, completion_reason = True, "tcp_half_open_idle_1s"
         if flow["protocol"] == "udp":
-            complete = (capture_end_timestamp is not None
-                        and capture_end_timestamp - flow["last_seen"] >= _UDP_IDLE_TIMEOUT_SECONDS)
+            complete = idle
             completion_reason = "udp_idle_timeout_1s" if complete else "incomplete"
+        if flow["protocol"] == "icmp":
+            complete = idle
+            completion_reason = "icmp_idle_timeout_1s" if complete else "incomplete"
         record = {
             "duration_seconds": max(flow["last_seen"] - flow["first_seen"], 0.0),
             "total_packets": flow["total_packets"], "total_bytes": flow["total_bytes"],

@@ -1716,7 +1716,7 @@ def evaluate_apex_ids2026(args) -> None:
     Attack_Verified and Benign_Verified labels are scored. The adapter maps the
     observed source-to-destination byte count to the initiator direction and
     zero response bytes. The publisher's benign tier is described as >=95%
-    confidence, so this dataset cannot establish a 0.25% FPR release bound.
+    confidence, so this dataset cannot establish the stricter 0.1% FPR release bound.
     """
     try:
         import pyarrow as pa
@@ -1906,7 +1906,7 @@ def evaluate_apex_ids2026(args) -> None:
         "capture_role": "one-pass external source-family diagnostic; not used for candidate training or threshold selection",
         "source_characterization": "real unidirectional NetFlow v9 exported from live ISP edge, June 21 through August 3 2026; no synthetic packet generation",
         "label_provenance": "only Attack_Verified and Benign_Verified publisher labels; tier 1 attack labels are honeypot source-IP/destination-port matches; tier 3 benign labels are publisher-verified safe destinations",
-        "label_quality_limit": "publisher data card describes Benign_Verified as high confidence (95%+), which is not sufficient to establish a 0.25% FPR bound; result is diagnostic and cannot promote the model",
+        "label_quality_limit": "publisher data card describes Benign_Verified as high confidence (95%+), which is not sufficient to establish the 0.1% FPR release bound; result is diagnostic and cannot promote the model",
         "label_policy": "Attack_Verified=attack, Benign_Verified=benign; all other labels excluded, never mapped to benign",
         "feature_adapter": "v9 mapping from duration_s, packets, bytes, protocol; unidirectional bytes map to source/originator direction and zero observed response bytes; labels, dates, IPs, ports, flags, and taxonomy are not model features",
         "archive_sha256": capture_sha,
@@ -3526,7 +3526,8 @@ def main(argv=None):
                         help="CTU flow contract; v9 tracks missing duration; v10 adds observed ports (CTU profile excludes unavailable TCP flags)")
     parser.add_argument("--ctu-feature-profile",
                         choices=("full_v8", "core_v3", "base_derived", "no_udp_heuristics",
-                                 "ctu_ports_only_v10", "no_udp_heuristics_v10"),
+                                 "ctu_ports_only_v10", "no_udp_heuristics_v10",
+                                 "no_src_port_v10", "no_endpoint_port_v10"),
                         default="full_v8",
                         help="CTU-13 feature ablation; reduced profiles use v8 fields but select a fixed subset before fitting")
     parser.add_argument("--model", choices=("extra_trees", "random_forest", "hist_gradient_boosting", "mlp"), default="extra_trees")
@@ -3552,11 +3553,14 @@ def main(argv=None):
     parser.add_argument("--ctu-allow-consumed-capture-training", nargs="*",
                         choices=tuple(sorted(CTU_CONSUMED_TRAIN_ONLY_CAPTURES)), default=[],
                         help="explicitly allow previously evaluated captures as development training data; they then cannot be validation or independent evidence")
+    parser.add_argument("--ctu-extra-train-shards", nargs="*", default=[],
+                        help="Manifests of train-role v10 shards from tools/stream_ingest.py; "
+                             "added to training only, each as its own capture group")
     parser.add_argument("--ctu-validation-captures", nargs="+",
                         choices=tuple(CTU_VALIDATION_CAPTURE_PATHS), default=["45"],
                         help="whole development captures; a shared threshold must satisfy the FPR bound on every listed capture")
     parser.add_argument("--ctu-dev-fpr-ci-ceiling", type=float, default=0.0025,
-                        help="CTU development-only Wilson upper-FPR ceiling per validation capture (default: 0.25%%); release gate is 0.25%% per independent test capture")
+                        help="CTU development-only Wilson upper-FPR ceiling per validation capture (default: 0.25%%); automatic-enforcement release gate is 0.1%% per independent test capture")
     parser.add_argument("--ctu-checkpoint-selection", choices=("joint_dev_gate", "development_nll"),
                         default="joint_dev_gate",
                         help="select CTU checkpoint by the joint per-capture dev operating point (default) or development NLL")
@@ -3574,7 +3578,7 @@ def main(argv=None):
     parser.add_argument("--capture-weighting", choices=("equal", "sqrt", "proportional"),
                         default="equal", help="per-capture training weight mass within each class")
     parser.add_argument("--fpr-ci-ceiling", type=float, default=RELEASE_FPR_CI_CEILING,
-                        help="two-sided 95% Wilson upper-FPR ceiling for generic candidate selection/evaluation; current release gate: 0.25% per independent capture")
+                        help="two-sided 95%% Wilson upper-FPR ceiling for generic candidate selection/evaluation; automatic-enforcement release gate: 0.1%% per independent capture")
     parser.add_argument("--seed", type=int, default=SEED)
     parser.add_argument("--include-clean", action=argparse.BooleanOptionalAction, default=True)
     parser.add_argument("--capture", choices=("36-1", "43-1", "52-1", "60-1", "45", "46", "47", "61-1",
@@ -3748,7 +3752,8 @@ def main(argv=None):
                 or ctu_full_feature_names[17] != "duration_missing"):
             raise ValueError("CTU schema v9 feature 17 must be duration_missing")
     elif args.ctu_feature_version == 10:
-        if args.ctu_feature_profile not in {"ctu_ports_only_v10", "no_udp_heuristics_v10"}:
+        if args.ctu_feature_profile not in {"ctu_ports_only_v10", "no_udp_heuristics_v10",
+                                            "no_src_port_v10", "no_endpoint_port_v10"}:
             raise ValueError("CTU schema v10 requires a supported v10 feature profile")
         # NetFlow CTU rows contain endpoint ports but not Zeek's packet-history
         # flags. Exclude v10's six TCP flag features rather than fabricate them.
@@ -3759,6 +3764,15 @@ def main(argv=None):
             # duration_missing and observed endpoint-port indicators.
             "no_udp_heuristics_v10": tuple(
                 i for i in range(40) if i not in {11, 13, 14, 15, 16}),
+            # Feature audit 2026-11-22: originator_port_log1p (18) separates
+            # CTU-13 classes by host OS ephemeral range (attack VMs 1024-5000,
+            # benign hosts 32768-65535), not by bot behaviour.
+            "no_src_port_v10": tuple(
+                i for i in range(40) if i not in {11, 13, 14, 15, 16, 18}),
+            # Also drop responder_port_log1p (19), whose direction flips by
+            # family; well-known destination-port indicators are retained.
+            "no_endpoint_port_v10": tuple(
+                i for i in range(40) if i not in {11, 13, 14, 15, 16, 18, 19}),
         }
         if len(ctu_full_feature_names) != 46:
             raise ValueError("CTU schema v10 feature contract changed unexpectedly")
@@ -3785,6 +3799,12 @@ def main(argv=None):
             "retains measured statistics, duration_missing, and observed port features; "
             "unavailable TCP flags are excluded."
             if FEATURE_VERSION == 10 and args.ctu_feature_profile == "no_udp_heuristics_v10"
+            else "v10 no_src_port_v10 = no_udp_heuristics_v10 minus originator_port_log1p (index 18), "
+            "an OS ephemeral-range artifact in CTU-13."
+            if FEATURE_VERSION == 10 and args.ctu_feature_profile == "no_src_port_v10"
+            else "v10 no_endpoint_port_v10 = no_udp_heuristics_v10 minus originator/responder "
+            "port log values (indices 18-19); well-known destination-port indicators retained."
+            if FEATURE_VERSION == 10 and args.ctu_feature_profile == "no_endpoint_port_v10"
             else "v10 port features mapped from observed CTU NetFlow endpoint ports; six unobserved handshake flags excluded."
             if FEATURE_VERSION == 10
             else "Existing CTU schema v8 profile definition."
@@ -3833,6 +3853,11 @@ def main(argv=None):
         "checkpoint_selection": args.ctu_checkpoint_selection,
         "weight_schemes": args.ctu_weight_schemes,
     }
+    if args.ctu_extra_train_shards:
+        if FEATURE_VERSION != 10:
+            raise ValueError("Extra train shards require CTU feature schema v10")
+        ctu_run_config["extra_train_shard_manifest_sha256"] = sorted(
+            sha256_file(Path(item)) for item in args.ctu_extra_train_shards)
     ctu_run_fingerprint = hashlib.sha256(json.dumps(
         ctu_run_config, sort_keys=True, separators=(",", ":")).encode("utf-8")).hexdigest()[:10]
     ctu_run_name = ("train-v9-validation-only" if ctu_is_default else
@@ -3894,6 +3919,30 @@ def main(argv=None):
         source_counts[capture_id] = {"attack": int((y == 1).sum()), "benign": int((y == 0).sum()),
                                      "unknown_or_invalid_excluded": int(excluded)}
         print(f"train {capture_id}: attack={(y==1).sum()} benign={(y==0).sum()} excluded={excluded}")
+    for manifest_path in args.ctu_extra_train_shards:
+        from integrityguard.stream_ingest import load_shard
+        x, y, manifest = load_shard(Path(manifest_path), expected_role="train")
+        capture_id = f"shard:{manifest['source_id']}"
+        if capture_id in source_hashes:
+            raise ValueError(f"Duplicate train shard {capture_id}")
+        raw_train.append(x); labels_train.append(y); udp_train.append(x[:, 5] > 0.5)
+        capture_ids_train.append(np.full(len(y), capture_id, dtype=object))
+        source_hashes[capture_id] = manifest["source"]["capture_sha256"]
+        source_label_rule_hashes[capture_id] = manifest["label_rule"]["sha256"]
+        source_label_provenance[capture_id] = {
+            "publisher_reference": manifest["label_rule"]["spec"].get("publisher_reference"),
+            "label_rule_id": manifest["label_rule"]["spec"].get("rule_id"),
+            "manifest_sha256": sha256_file(Path(manifest_path)),
+            "shard_sha256": manifest["shard"]["sha256"],
+            "source": manifest["source"].get("source"),
+            "metadata": manifest.get("metadata", {}),
+            "adapter": manifest["adapter"]["name"],
+        }
+        source_counts[capture_id] = {"attack": int((y == 1).sum()), "benign": int((y == 0).sum()),
+                                     "unknown_or_invalid_excluded": int(
+                                         manifest["counts"]["flows_label_excluded"]
+                                         + manifest["counts"]["flows_incomplete_excluded"])}
+        print(f"train {capture_id}: attack={(y==1).sum()} benign={(y==0).sum()} (stream shard)")
     x_train = np.concatenate(raw_train)[:, ctu_profile_indices]; y_train = np.concatenate(labels_train)
     udp_train = np.concatenate(udp_train)
     capture_ids_train = np.concatenate(capture_ids_train)
@@ -4066,7 +4115,7 @@ def main(argv=None):
         "selection_rule": ("select one threshold maximizing minimum per-capture recall CI lower bound, "
                            f"subject to Wilson 95% upper FPR <= {args.ctu_dev_fpr_ci_ceiling:.6g} "
                            "on every whole validation capture; this is development-only and does not change "
-                           "the 0.25% independent-test release gate"),
+                           "the 0.1% independent-test release gate"),
         "schemes": summary,
         "runtime_classifier_supported": False,
         "runtime_status": "Research candidate only; app packet parser emits v10 transport features, but the production classifier loader currently runs the separate v3 candidate.",

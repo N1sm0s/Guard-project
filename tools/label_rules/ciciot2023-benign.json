@@ -1,0 +1,7 @@
+{
+  "rule_id": "ciciot2023-benign",
+  "publisher_reference": "Neto et al., CICIoT2023, Sensors 23(13):5941, doi:10.3390/s23135941 (PMC10346235): sec. 3.2 - '7 Raspberry Pi devices ... responsible for executing the attacks'; Table 1 lists Raspberry Pi 4 MACs DC:A6:32:C9:E6:F4, DC:A6:32:C9:E4:C6, DC:A6:32:C9:E5:02 and no Raspberry Pi victim; Table 2 tools: udp-flood (UDP Flood), hping3 (SYN/ICMP floods); sec. 3.4 - publisher labels the entire capture of each attack as that attack.",
+  "default": "benign",
+  "rules": [],
+  "note": "Publisher: benign capture collected over 16 h with no attacks running; idle and human-interaction IoT traffic."
+}

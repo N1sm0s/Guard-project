@@ -1,0 +1,16 @@
+{
+  "rule_id": "ciciot2023-udp-flood",
+  "publisher_reference": "Neto et al., CICIoT2023, Sensors 23(13):5941, doi:10.3390/s23135941 (PMC10346235): sec. 3.2 - '7 Raspberry Pi devices ... responsible for executing the attacks'; Table 1 lists Raspberry Pi 4 MACs DC:A6:32:C9:E6:F4, DC:A6:32:C9:E4:C6, DC:A6:32:C9:E5:02 and no Raspberry Pi victim; Table 2 tools: udp-flood (UDP Flood), hping3 (SYN/ICMP floods); sec. 3.4 - publisher labels the entire capture of each attack as that attack.",
+  "default": "exclude",
+  "rules": [
+    {
+      "label": "attack",
+      "mac_src": [
+        "DC:A6:32"
+      ],
+      "protocol": "udp",
+      "note": "DC:A6:32 is the Raspberry Pi 4 OUI. Using the OUI (not only the 3 listed MACs) covers all 7 attacker Pis; before training, verify on the capture that <=7 distinct DC:A6:32 source MACs appear and that no victim device has this OUI."
+    }
+  ],
+  "note": "Per-flow refinement of the per-file publisher label: only UDP flows originated by attacker Pis are attack; other devices' traffic and Pi control traffic are excluded, not benign."
+}
