@@ -36,13 +36,14 @@ guard = IntegrityGuard.__new__(IntegrityGuard)
 guard.registry = Path(sys.argv[1])
 event = dict(event_id='crash-id', package='test', stage='deploy',
              version='2', verdict='BLOCK', threat='weights', score=1, fingerprint='abc')
-original = os.replace
+original = os.fsync
 if sys.argv[2] == 'crash':
-    def interrupted(source, destination):
-        original(source, destination)
-        if Path(destination).name == 'events.jsonl':
-            os._exit(73)
-    os.replace = interrupted
+    # The append writes the line, then fsyncs, then commits the index.
+    # Exiting right after the first fsync is the crash window between write and commit.
+    def interrupted(fd):
+        original(fd)
+        os._exit(73)
+    os.fsync = interrupted
 guard.respond(event)
 """
     cwd = Path(__file__).resolve().parents[1]
