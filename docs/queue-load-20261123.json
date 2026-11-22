@@ -1,0 +1,40 @@
+{
+  "kind": "queue_load_test",
+  "synthetic_packages": true,
+  "not_model_evidence": true,
+  "environment": {
+    "python": "3.12.10",
+    "platform": "Windows-11-10.0.26300-SP0",
+    "cpu_count": 24
+  },
+  "code_sha256": {
+    "intake.py": "3b1edb0eb355b14bc41f19b27101e315cdbf72828f88957e80d766882d03285e",
+    "journal.py": "a631f96977d787f6af00a93d3f6ef15546da9675becae69b8256acb1a21ec9d0"
+  },
+  "n": 1000,
+  "throughput": {
+    "moved": 1000,
+    "errors": 0,
+    "seconds": 26.817,
+    "packages_per_second": 37.3,
+    "peak_heap_mb": 1.14,
+    "journal_records": 1000,
+    "journal_unique_event_ids": 1000
+  },
+  "crash_recovery": {
+    "crash_injected_at_index": 500,
+    "crash_exit_code_ok": true,
+    "packages_left_after_crash": 500,
+    "recovery_run": {
+      "moved": 500,
+      "errors": 0,
+      "seconds": 9.253,
+      "packages_per_second": 54.0
+    },
+    "recovery_seconds": 9.253,
+    "journal_records": 1000,
+    "journal_unique_event_ids": 1000,
+    "packages_archived": 1000,
+    "exactly_once": true
+  }
+}
