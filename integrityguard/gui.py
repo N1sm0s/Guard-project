@@ -1128,7 +1128,14 @@ class MainWindow(QMainWindow):
             from .network_runtime_evidence import record_packet_capture_segment, record_captured_flows
             from .pktmon_capture import capture_header_segment
             try:
-                capture = capture_header_segment(duration_seconds=30)
+                # P2.5: optional split mode. The app itself never needs administrator rights;
+                # the elevated helper is started through a UAC prompt. Off by default.
+                if str(self.settings.value("pktmon_helper", "0") or "0").strip() == "1":
+                    from .pktmon_segment import capture_via_helper, helper_command
+                    program, script = helper_command()
+                    capture = capture_via_helper(30, DATA, program, script)
+                else:
+                    capture = capture_header_segment(duration_seconds=30)
             except Exception as error:  # noqa: BLE001 — persist the sensor failure for diagnosis
                 capture = {"status": "capture_exception",
                            "reason": f"{type(error).__name__}: {error}"[:400]}
