@@ -1,11 +1,10 @@
 """Append-only store of real, locally captured network telemetry snapshots.
 
-This persists exactly what integrityguard.network_ai.NetworkTelemetry.sample()
+This persists exactly what integrityguard.network_telemetry.NetworkTelemetry.sample()
 returns (OS interface counters + active socket metadata; no packet payloads),
-plus an optional advisory Ollama assessment, so a human can review and label a
-specific observed flow later. Nothing here is a ground-truth label: a model
-decision or a DShield match is never written as a verdict, only as additional
-context alongside the raw observation. Confirmed human labels belong in
+plus optional historical model context for backward compatibility. New captures
+store no model assessment. Nothing here is a ground-truth label: a model decision
+or a DShield match is never written as a verdict. Confirmed human labels belong in
 integrityguard.network_label_reviews.NetworkLabelReviews, keyed to the event
 and flow id captured here.
 """
@@ -69,6 +68,47 @@ class NetworkEventLog:
         return {"event_id": event_id, "captured_at_utc": captured_at, "snapshot_sha256": snapshot_sha,
                 "snapshot": json.loads(snapshot_json),
                 "assessment": json.loads(assessment_json) if assessment_json else None, "source": source}
+
+    def all_labeled(self) -> list[dict]:
+        """Legacy accessor for snapshots with historical model assessments.
+
+        These assessments are not ground truth and must not be used to train or
+        objectively evaluate the local classifier.
+        """
+        with closing(sqlite3.connect(self.path)) as db:
+            rows = db.execute("""SELECT event_id,captured_at_utc,snapshot_json,assessment_json FROM events
+                                 WHERE assessment_json IS NOT NULL ORDER BY captured_at_utc ASC""").fetchall()
+        out = []
+        for event_id, captured_at, snapshot_json, assessment_json in rows:
+            try:
+                snapshot = json.loads(snapshot_json)
+                assessment = json.loads(assessment_json)
+            except (TypeError, ValueError):
+                continue
+            out.append({"event_id": event_id, "captured_at_utc": captured_at,
+                        "snapshot": snapshot, "assessment": assessment})
+        return out
+
+    def all_events(self) -> list[dict]:
+        """Return real captured snapshots with their stable capture metadata.
+
+        Unlike all_labeled(), this deliberately excludes historical assessments.
+        """
+        with closing(sqlite3.connect(self.path)) as db:
+            rows = db.execute("""SELECT event_id,captured_at_utc,snapshot_sha256,snapshot_json,source
+                                 FROM events ORDER BY captured_at_utc,event_id""").fetchall()
+        out = []
+        for event_id, captured_at, snapshot_sha, snapshot_json, source in rows:
+            try:
+                snapshot = json.loads(snapshot_json)
+            except (TypeError, ValueError):
+                continue
+            canonical = json.dumps(snapshot, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+            if hashlib.sha256(canonical.encode("utf-8")).hexdigest() != snapshot_sha:
+                continue
+            out.append({"event_id": event_id, "captured_at_utc": captured_at,
+                        "snapshot_sha256": snapshot_sha, "snapshot": snapshot, "source": source})
+        return out
 
     def list_recent(self, limit: int = 50) -> list[dict]:
         limit = max(1, min(int(limit), 500))

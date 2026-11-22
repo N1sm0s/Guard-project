@@ -1,16 +1,8 @@
-"""Two-reviewer agreement mechanics for real network-flow labeling.
+"""Evidence-attached adjudication mechanics for live network telemetry.
 
-Mirrors tests/test_audit_reviews_real.py's approach, applied to
-NetworkLabelReviews and keyed to a real NetworkTelemetry.sample() snapshot
-captured via NetworkEventLog (not a hand-built flow). No real incident
-catalog of confirmed-malicious traffic exists for this project yet, so these
-tests verify the review mechanics themselves -- evidence integrity, the
-one-account-cannot-confirm-twice rule, two-distinct-accounts agreement, and
-disagreement reporting -- rather than any specific real verdict. Simulating
-a second reviewer account is unavoidable in an automated test (only one OS
-account is available here), done by monkeypatching reviewer_identity() for
-that one call; this does not relax the real one-vote-per-account rule the
-module itself enforces by OS username.
+These tests cover event/flow binding, evidence-file integrity, a single
+accountable operator, conflict handling, and status reporting. The text fixture
+is test-only and does not establish real label quality.
 """
 import hashlib
 import sqlite3
@@ -23,7 +15,7 @@ from unittest import mock
 import psutil
 
 from integrityguard import network_label_reviews as nlr
-from integrityguard.network_ai import NetworkTelemetry
+from integrityguard.network_telemetry import NetworkTelemetry
 from integrityguard.network_evidence import NetworkEventLog
 from integrityguard.network_label_reviews import NetworkLabelReviews
 
@@ -53,30 +45,27 @@ class NetworkLabelReviewTests(unittest.TestCase):
         return self.store.propose(self.event_id, self.flow_id, self.snapshot_sha256, is_malicious,
                                   self.evidence, RATIONALE)
 
-    def test_single_reviewer_is_not_accepted(self):
+    def test_one_accountable_operator_with_attached_artifact_is_recorded(self):
         decision = self.propose()
-        self.assertFalse(decision["accepted"])
-        self.assertEqual(decision["status"], "awaiting_independent_review")
-        self.assertEqual(decision["reviewer_count"], 1)
+        self.assertTrue(decision["accepted"])
+        self.assertEqual(decision["status"], "evidence_attached_adjudication")
+        self.assertEqual(decision["label"], 0)
 
-    def test_one_account_voting_twice_never_reaches_agreement(self):
+    def test_repeated_submission_by_one_account_is_still_one_adjudication(self):
         self.propose()
         decision = self.propose()
-        self.assertFalse(decision["accepted"])
-        self.assertEqual(decision["reviewer_count"], 1)
+        self.assertTrue(decision["accepted"])
         with closing(sqlite3.connect(self.store.path)) as db:
             self.assertEqual(db.execute("SELECT COUNT(*) FROM reviews").fetchone()[0], 2)
 
-    def test_two_distinct_accounts_agreeing_is_verified(self):
+    def test_repeat_submission_from_one_account_updates_same_adjudication(self):
         self.propose(is_malicious=False)
-        with mock.patch.object(nlr, "reviewer_identity", return_value="second-reviewer-account"):
-            decision = self.propose(is_malicious=False)
+        decision = self.propose(is_malicious=False)
         self.assertTrue(decision["accepted"])
-        self.assertEqual(decision["status"], "verified_local_review")
+        self.assertEqual(decision["status"], "evidence_attached_adjudication")
         self.assertEqual(decision["label"], 0)
-        self.assertEqual(decision["reviewer_count"], 2)
 
-    def test_two_distinct_accounts_disagreeing_is_disputed(self):
+    def test_conflicting_evidence_backed_adjudications_are_disputed(self):
         self.propose(is_malicious=False)
         with mock.patch.object(nlr, "reviewer_identity", return_value="second-reviewer-account"):
             decision = self.propose(is_malicious=True)
@@ -91,6 +80,23 @@ class NetworkLabelReviewTests(unittest.TestCase):
     def test_missing_rationale_rejected(self):
         with self.assertRaises(ValueError):
             self.store.propose(self.event_id, self.flow_id, self.snapshot_sha256, False, self.evidence, "too short")
+
+    def test_application_verdict_is_not_ground_truth(self):
+        self.evidence.write_text("GUI label: ALLOW\\nNo threat signals detected.", encoding="utf-8")
+        decision = self.propose(is_malicious=False)
+        self.assertFalse(decision["accepted"])
+        self.assertEqual(decision["status"], "invalid_evidence")
+        self.assertEqual(self.store.adjudicated_snapshot_labels(self.events), [])
+
+    def test_status_counts_reflects_mixed_outcomes(self):
+        counts = self.store.status_counts()
+        self.assertEqual(counts, {"items": 0, "awaiting_evidence": 0, "disputed": 0,
+                                  "evidence_attached_adjudication": 0, "invalid_evidence": 0})
+        self.propose(is_malicious=False)
+        counts = self.store.status_counts()
+        self.assertEqual(counts["items"], 1)
+        self.assertEqual(counts["evidence_attached_adjudication"], 1)
+        self.assertEqual(counts["awaiting_evidence"], 0)
 
     def test_evidence_blob_preserved_and_hash_verified(self):
         self.propose()

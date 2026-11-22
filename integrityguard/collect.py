@@ -47,11 +47,12 @@ def sign_package(pkg_dir, key: bytes) -> str:
     return sig
 
 
-def verify_package(pkg_dir, key: bytes | None) -> bool:
+def verify_package(pkg_dir, key: bytes | None, package_fingerprint: str | None = None) -> bool:
     sig = Path(pkg_dir) / "manifest.sig"
     if key is None or not sig.exists():
         return False
-    good = hmac.new(key, fingerprint(pkg_dir).encode(), hashlib.sha256).hexdigest()
+    current_fingerprint = package_fingerprint or fingerprint(pkg_dir)
+    good = hmac.new(key, current_fingerprint.encode(), hashlib.sha256).hexdigest()
     return hmac.compare_digest(good, sig.read_text(encoding="utf-8-sig").strip())
 
 
@@ -96,8 +97,10 @@ def load_package(pkg_dir, key: bytes | None = None) -> PackageSpec:
             state = OrderedDict((k, v) for k, v in obj.items() if isinstance(v, torch.Tensor))
         except Exception:
             unsafe = True
-    return PackageSpec(name, version, deps, mods, state, verify_package(root, key), unsafe,
-                       str(man.get("dataset_sha256", "")))
+    package_fingerprint = fingerprint(root)
+    return PackageSpec(name, version, deps, mods, state,
+                       verify_package(root, key, package_fingerprint), unsafe,
+                       str(man.get("dataset_sha256", "")), package_fingerprint)
 
 
 def save_package(spec: PackageSpec, pkg_dir, key: bytes | None = None) -> None:

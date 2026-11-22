@@ -5,7 +5,7 @@ from contextlib import closing
 import json
 from pathlib import Path
 import sqlite3
-from integrityguard.copilot_audit import CopilotAudit
+from integrityguard.security_audit import SecurityAudit
 
 
 def main():
@@ -16,7 +16,7 @@ def main():
     if args.audit_db is None:
         from integrityguard.paths import DATA_ROOT
 
-        args.audit_db = DATA_ROOT / "copilot_audit.sqlite"
+        args.audit_db = DATA_ROOT / "security_audit.sqlite"
     pending = Counter()
     completed = Counter()
     completed_by_action = {"firewall_block": Counter(), "firewall_unblock": Counter()}
@@ -28,7 +28,7 @@ def main():
                 "SELECT timestamp_utc,principal,question_sha256,answer_sha256,model,status,"
                 "sources_json,tools_json,previous_hash,record_hash FROM turns ORDER BY seq"
             ).fetchall()
-            integrity = CopilotAudit.verify_rows(rows)
+            integrity = SecurityAudit.verify_rows(rows)
             if not integrity["valid"]:
                 parser.error(f"Audit integrity check failed: {integrity['reason']}")
             for _, _, key, _, _, _, _, raw, _, _ in rows:

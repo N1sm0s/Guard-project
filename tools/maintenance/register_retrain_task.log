@@ -1,0 +1,37 @@
+﻿**********************
+Начало записи сценария Windows PowerShell
+Время начала: 20261114195043
+Имя пользователя: NISMO\pavel
+Запуск от имени пользователя: NISMO\pavel
+Имя конфигурации: 
+Компьютер: NISMO (Microsoft Windows NT 10.0.26300.0)
+Ведущее приложение: C:\WINDOWS\System32\WindowsPowerShell\v1.0\powershell.exe -ExecutionPolicy Bypass -File F:\New\integrityguard\tools\maintenance\register_retrain_task.ps1
+ИД процесса: 18036
+PSVersion: 5.1.26100.9818
+PSEdition: Desktop
+PSCompatibleVersions: 1.0, 2.0, 3.0, 4.0, 5.0, 5.1.26100.9818
+BuildVersion: 10.0.26100.9818
+CLRVersion: 4.0.30319.42000
+WSManStackVersion: 3.0
+PSRemotingProtocolVersion: 2.3
+SerializationVersion: 1.1.0.1
+**********************
+removed existing task
+
+TaskPath                                       TaskName                          State
+--------                                       --------                          -----
+\                                              IntegrityGuard NN Retrain         Ready
+registered
+
+TaskName : IntegrityGuard NN Retrain
+State    : Ready
+
+
+LastRunTime    : 11/14/2026 7:50:44 PM
+LastTaskResult : 0
+NextRunTime    : 11/14/2026 7:51:44 PM
+
+**********************
+Конец записи протокола Windows PowerShell
+Время окончания: 20261114195110
+**********************

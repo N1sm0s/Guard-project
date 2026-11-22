@@ -1,0 +1,190 @@
+Traceback (most recent call last):
+  File "F:\New\integrityguard\integrityguard\gui.py", line 139, in run
+    self.done.emit(self.fn(self.progress.emit))
+                   ^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "F:\New\integrityguard\integrityguard\gui.py", line 1146, in work
+    assessment = assess_network_with_ollama(snapshot, app_state, model)
+                 ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "F:\New\integrityguard\integrityguard\network_ai.py", line 290, in assess_network_with_ollama
+    raise RuntimeError("Локальная служба Ollama недоступна")
+RuntimeError: Локальная служба Ollama недоступна
+Traceback (most recent call last):
+  File "F:\New\integrityguard\integrityguard\gui.py", line 139, in run
+    self.done.emit(self.fn(self.progress.emit))
+                   ^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "F:\New\integrityguard\integrityguard\gui.py", line 1146, in work
+    assessment = assess_network_with_ollama(snapshot, app_state, model)
+                 ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "F:\New\integrityguard\integrityguard\network_ai.py", line 290, in assess_network_with_ollama
+    raise RuntimeError("Локальная служба Ollama недоступна")
+RuntimeError: Локальная служба Ollama недоступна
+Traceback (most recent call last):
+  File "F:\New\integrityguard\integrityguard\gui.py", line 139, in run
+    self.done.emit(self.fn(self.progress.emit))
+                   ^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "F:\New\integrityguard\integrityguard\gui.py", line 1146, in work
+    assessment = assess_network_with_ollama(snapshot, app_state, model)
+                 ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "F:\New\integrityguard\integrityguard\network_ai.py", line 290, in assess_network_with_ollama
+    raise RuntimeError("Локальная служба Ollama недоступна")
+RuntimeError: Локальная служба Ollama недоступна
+Traceback (most recent call last):
+  File "F:\New\integrityguard\integrityguard\gui.py", line 139, in run
+    self.done.emit(self.fn(self.progress.emit))
+                   ^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "F:\New\integrityguard\integrityguard\gui.py", line 1146, in work
+    assessment = assess_network_with_ollama(snapshot, app_state, model)
+                 ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "F:\New\integrityguard\integrityguard\network_ai.py", line 290, in assess_network_with_ollama
+    raise RuntimeError("Локальная служба Ollama недоступна")
+RuntimeError: Локальная служба Ollama недоступна
+Traceback (most recent call last):
+  File "F:\New\integrityguard\integrityguard\gui.py", line 139, in run
+    self.done.emit(self.fn(self.progress.emit))
+                   ^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "F:\New\integrityguard\integrityguard\gui.py", line 1146, in work
+    assessment = assess_network_with_ollama(snapshot, app_state, model)
+                 ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "F:\New\integrityguard\integrityguard\network_ai.py", line 290, in assess_network_with_ollama
+    raise RuntimeError("Локальная служба Ollama недоступна")
+RuntimeError: Локальная служба Ollama недоступна
+Traceback (most recent call last):
+  File "F:\New\integrityguard\integrityguard\gui.py", line 139, in run
+    self.done.emit(self.fn(self.progress.emit))
+                   ^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "F:\New\integrityguard\integrityguard\gui.py", line 1146, in work
+    assessment = assess_network_with_ollama(snapshot, app_state, model)
+                 ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "F:\New\integrityguard\integrityguard\network_ai.py", line 290, in assess_network_with_ollama
+    raise RuntimeError("Локальная служба Ollama недоступна")
+RuntimeError: Локальная служба Ollama недоступна
+Traceback (most recent call last):
+  File "F:\New\integrityguard\integrityguard\gui.py", line 139, in run
+    self.done.emit(self.fn(self.progress.emit))
+                   ^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "F:\New\integrityguard\integrityguard\gui.py", line 1146, in work
+    assessment = assess_network_with_ollama(snapshot, app_state, model)
+                 ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "F:\New\integrityguard\integrityguard\network_ai.py", line 290, in assess_network_with_ollama
+    raise RuntimeError("Локальная служба Ollama недоступна")
+RuntimeError: Локальная служба Ollama недоступна
+Traceback (most recent call last):
+  File "F:\New\integrityguard\integrityguard\gui.py", line 139, in run
+    self.done.emit(self.fn(self.progress.emit))
+                   ^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "F:\New\integrityguard\integrityguard\gui.py", line 1146, in work
+    assessment = assess_network_with_ollama(snapshot, app_state, model)
+                 ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "F:\New\integrityguard\integrityguard\network_ai.py", line 290, in assess_network_with_ollama
+    raise RuntimeError("Локальная служба Ollama недоступна")
+RuntimeError: Локальная служба Ollama недоступна
+Traceback (most recent call last):
+  File "F:\New\integrityguard\integrityguard\gui.py", line 139, in run
+    self.done.emit(self.fn(self.progress.emit))
+                   ^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "F:\New\integrityguard\integrityguard\gui.py", line 1146, in work
+    assessment = assess_network_with_ollama(snapshot, app_state, model)
+                 ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "F:\New\integrityguard\integrityguard\network_ai.py", line 290, in assess_network_with_ollama
+    raise RuntimeError("Локальная служба Ollama недоступна")
+RuntimeError: Локальная служба Ollama недоступна
+Traceback (most recent call last):
+  File "F:\New\integrityguard\integrityguard\gui.py", line 139, in run
+    self.done.emit(self.fn(self.progress.emit))
+                   ^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "F:\New\integrityguard\integrityguard\gui.py", line 1146, in work
+    assessment = assess_network_with_ollama(snapshot, app_state, model)
+                 ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "F:\New\integrityguard\integrityguard\network_ai.py", line 290, in assess_network_with_ollama
+    raise RuntimeError("Локальная служба Ollama недоступна")
+RuntimeError: Локальная служба Ollama недоступна
+Traceback (most recent call last):
+  File "F:\New\integrityguard\integrityguard\gui.py", line 139, in run
+    self.done.emit(self.fn(self.progress.emit))
+                   ^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "F:\New\integrityguard\integrityguard\gui.py", line 1146, in work
+    assessment = assess_network_with_ollama(snapshot, app_state, model)
+                 ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "F:\New\integrityguard\integrityguard\network_ai.py", line 290, in assess_network_with_ollama
+    raise RuntimeError("Локальная служба Ollama недоступна")
+RuntimeError: Локальная служба Ollama недоступна
+Traceback (most recent call last):
+  File "F:\New\integrityguard\integrityguard\gui.py", line 139, in run
+    self.done.emit(self.fn(self.progress.emit))
+                   ^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "F:\New\integrityguard\integrityguard\gui.py", line 1146, in work
+    assessment = assess_network_with_ollama(snapshot, app_state, model)
+                 ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "F:\New\integrityguard\integrityguard\network_ai.py", line 290, in assess_network_with_ollama
+    raise RuntimeError("Локальная служба Ollama недоступна")
+RuntimeError: Локальная служба Ollama недоступна
+Traceback (most recent call last):
+  File "F:\New\integrityguard\integrityguard\gui.py", line 139, in run
+    self.done.emit(self.fn(self.progress.emit))
+                   ^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "F:\New\integrityguard\integrityguard\gui.py", line 1146, in work
+    assessment = assess_network_with_ollama(snapshot, app_state, model)
+                 ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "F:\New\integrityguard\integrityguard\network_ai.py", line 290, in assess_network_with_ollama
+    raise RuntimeError("Локальная служба Ollama недоступна")
+RuntimeError: Локальная служба Ollama недоступна
+Traceback (most recent call last):
+  File "F:\New\integrityguard\integrityguard\gui.py", line 139, in run
+    self.done.emit(self.fn(self.progress.emit))
+                   ^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "F:\New\integrityguard\integrityguard\gui.py", line 1146, in work
+    assessment = assess_network_with_ollama(snapshot, app_state, model)
+                 ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "F:\New\integrityguard\integrityguard\network_ai.py", line 290, in assess_network_with_ollama
+    raise RuntimeError("Локальная служба Ollama недоступна")
+RuntimeError: Локальная служба Ollama недоступна
+Traceback (most recent call last):
+  File "F:\New\integrityguard\integrityguard\gui.py", line 139, in run
+    self.done.emit(self.fn(self.progress.emit))
+                   ^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "F:\New\integrityguard\integrityguard\gui.py", line 1146, in work
+    assessment = assess_network_with_ollama(snapshot, app_state, model)
+                 ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "F:\New\integrityguard\integrityguard\network_ai.py", line 290, in assess_network_with_ollama
+    raise RuntimeError("Локальная служба Ollama недоступна")
+RuntimeError: Локальная служба Ollama недоступна
+Traceback (most recent call last):
+  File "F:\New\integrityguard\integrityguard\gui.py", line 139, in run
+    self.done.emit(self.fn(self.progress.emit))
+                   ^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "F:\New\integrityguard\integrityguard\gui.py", line 1146, in work
+    assessment = assess_network_with_ollama(snapshot, app_state, model)
+                 ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "F:\New\integrityguard\integrityguard\network_ai.py", line 290, in assess_network_with_ollama
+    raise RuntimeError("Локальная служба Ollama недоступна")
+RuntimeError: Локальная служба Ollama недоступна
+Traceback (most recent call last):
+  File "F:\New\integrityguard\integrityguard\gui.py", line 139, in run
+    self.done.emit(self.fn(self.progress.emit))
+                   ^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "F:\New\integrityguard\integrityguard\gui.py", line 1146, in work
+    assessment = assess_network_with_ollama(snapshot, app_state, model)
+                 ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "F:\New\integrityguard\integrityguard\network_ai.py", line 290, in assess_network_with_ollama
+    raise RuntimeError("Локальная служба Ollama недоступна")
+RuntimeError: Локальная служба Ollama недоступна
+Traceback (most recent call last):
+  File "F:\New\integrityguard\integrityguard\gui.py", line 139, in run
+    self.done.emit(self.fn(self.progress.emit))
+                   ^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "F:\New\integrityguard\integrityguard\gui.py", line 1146, in work
+    assessment = assess_network_with_ollama(snapshot, app_state, model)
+                 ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "F:\New\integrityguard\integrityguard\network_ai.py", line 290, in assess_network_with_ollama
+    raise RuntimeError("Локальная служба Ollama недоступна")
+RuntimeError: Локальная служба Ollama недоступна
+Traceback (most recent call last):
+  File "F:\New\integrityguard\integrityguard\gui.py", line 139, in run
+    self.done.emit(self.fn(self.progress.emit))
+                   ^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "F:\New\integrityguard\integrityguard\gui.py", line 1146, in work
+    assessment = assess_network_with_ollama(snapshot, app_state, model)
+                 ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "F:\New\integrityguard\integrityguard\network_ai.py", line 290, in assess_network_with_ollama
+    raise RuntimeError("Локальная служба Ollama недоступна")
+RuntimeError: Локальная служба Ollama недоступна

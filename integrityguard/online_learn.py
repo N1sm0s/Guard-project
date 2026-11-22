@@ -83,6 +83,39 @@ def maybe_queue(data_root: Path, event: dict, features: dict, rng=None, evidence
     _save_queue(d, queue)
     return item_id
 
+def maybe_queue_network(data_root: Path, event_id: str, snap_json: str,
+                        decision: str, features: dict, rng=None) -> str | None:
+    """Ставит сетевой снимок на аудит человеком (для обучения классификатора сети).
+
+    Вызывается из _check_nn() после получения вердикта от нейросети.
+    features — словарь 26 именованных float-признаков из extract_features().
+    decision — 'ALLOW', 'REVIEW' или 'BLOCK'.
+    Возвращает id записи, если пакет поставлен на аудит, иначе None.
+    """
+    # Ставим на аудит только подозрительные (REVIEW/BLOCK), с вероятностью AUDIT_RATE
+    if decision not in ("REVIEW", "BLOCK"):
+        return None
+    rng = rng or np.random.default_rng()
+    if rng.random() >= AUDIT_RATE:
+        return None
+    d = _dirs(data_root)
+    item_id = f"net_{int(time.time() * 1000)}_{int(rng.integers(0, 1_000_000))}"
+    # Сохраняем признаки как тензор (совместимость с confirm())
+    feat_tensor = torch.tensor(list(features.values()), dtype=torch.float32)
+    feat_names = list(features.keys())
+    torch.save({"network_features": feat_tensor, "feature_names": feat_names,
+                "snap_json": snap_json, "decision": decision}, d / "pending" / f"{item_id}.pt")
+    queue = _load_queue(d)
+    queue.append({"id": item_id, "time": time.strftime("%Y-%m-%d %H:%M:%S"),
+                 "package": "Сетевой снимок", "verdict": decision,
+                 "project_id": str(event_id)[:20],
+                 "threat_ru": f"Автоанализ: {decision}", "score": None,
+                 "event_id": str(event_id), "fingerprint": None,
+                 "model_sha256": None, "feature_sha256": None,
+                 "evidence_db": None, "source": "network_classifier"})
+    _save_queue(d, queue)
+    return item_id
+
 
 def list_pending(data_root: Path) -> list:
     """Записи, ожидающие подтверждения человеком (новые — первыми)."""

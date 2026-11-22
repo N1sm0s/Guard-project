@@ -77,6 +77,7 @@ class PackageSpec:
     signed_ok: bool = True          # подпись манифеста верна
     unsafe_format: bool = False     # модель сериализована небезопасным pickle
     dataset_sha256: str = ""
+    fingerprint: str = ""          # вычисленный при чтении сводный хеш файлов пакета
 
     def dep(self, name: str) -> Dep | None:
         return next((d for d in self.deps if d.name == name), None)

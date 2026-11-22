@@ -62,3 +62,26 @@ class AuditReviews:
                          'disputed' if len(labels) > 1 else 'awaiting_independent_review',
                 'accepted': accepted, 'label': next(iter(labels)) if accepted else None,
                 'review_ids': sorted(row[0] for row in votes), 'reviewer_count': len(votes)}
+
+    def status_counts(self) -> dict:
+        """Aggregate decision() over every distinct (event_id, fingerprint) ever reviewed.
+
+        For display only (e.g. a dashboard chart of labeling progress) -- never a source
+        of truth for training eligibility, which stays per-key via decision().
+        """
+        with closing(sqlite3.connect(self.path)) as db:
+            rows = db.execute('''SELECT event_id,fingerprint,reviewer,label,evidence_sha256,evidence
+                                 FROM reviews ORDER BY id''').fetchall()
+        groups: dict[tuple, dict] = {}
+        for event_id, fingerprint, reviewer, label, evidence_sha256, evidence in rows:
+            groups.setdefault((event_id, fingerprint), {})[reviewer] = (label, evidence_sha256, evidence)
+        counts = {'awaiting_independent_review': 0, 'disputed': 0, 'verified_local_review': 0}
+        for latest in groups.values():
+            votes = list(latest.values())
+            intact = all(hashlib.sha256(v[2]).hexdigest() == v[1] for v in votes)
+            labels = {v[0] for v in votes}
+            accepted = intact and len(votes) >= 2 and len(labels) == 1
+            status = ('verified_local_review' if accepted else
+                      'disputed' if len(labels) > 1 else 'awaiting_independent_review')
+            counts[status] += 1
+        return {'items': len(groups), **counts}

@@ -16,6 +16,111 @@ SURFACE, GRID, INK, MUTED, ACCENT, SECOND = "#12151c", "#222733", "#e9ebef", "#8
 STATUS = {"ALLOW": ("Допуск", "#1f9d63"), "REVIEW": ("На проверку", "#d99a1c"), "BLOCK": ("Блокировка", "#e5484d")}
 
 
+class TrainingHistoryChart(QWidget):
+    """Recorded losses and development recall confidence bound; no interpolated data."""
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.epochs = []
+        self.train_loss = []
+        self.dev_loss = []
+        self.dev_recall_ci_lower = []
+        self.best_dev_recall_ci_lower = []
+        self.setMinimumHeight(210)
+        self.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
+
+    def set_history(self, rows):
+        valid = [row for row in rows if isinstance(row, dict)
+                 and row.get("event") == "epoch"
+                 and isinstance(row.get("epoch"), int)
+                 and isinstance(row.get("train_loss"), (int, float))
+                 and isinstance(row.get("development_nll"), (int, float))]
+        self.epochs = [row["epoch"] for row in valid]
+        self.train_loss = [float(row["train_loss"]) for row in valid]
+        self.dev_loss = [float(row["development_nll"]) for row in valid]
+        self.dev_recall_ci_lower = [
+            float(row.get("development_min_recall_ci95_lower") or 0.0) for row in valid]
+        self.best_dev_recall_ci_lower = [
+            float(row.get("best_development_min_recall_ci95_lower") or 0.0) for row in valid]
+        self.update()
+
+    def paintEvent(self, _event):
+        p = QPainter(self)
+        p.setRenderHint(QPainter.Antialiasing)
+        p.fillRect(self.rect(), QColor(SURFACE))
+        left, right, top, bottom = 54, self.width() - 48, 28, self.height() - 36
+        plot = QRectF(left, top, max(1, right - left), max(1, bottom - top))
+        if len(self.epochs) < 2:
+            p.setPen(QColor(MUTED))
+            p.drawText(plot, Qt.AlignCenter, "Кривые появятся после записи минимум двух эпох реального обучения")
+            p.end()
+            return
+        vals = self.train_loss + self.dev_loss
+        vmax = max(max(vals), 1e-6)
+        vmin = min(0.0, min(vals))
+        span = max(vmax - vmin, 1e-6)
+        p.setFont(QFont("Segoe UI", 8))
+        for i in range(5):
+            y = plot.bottom() - plot.height() * i / 4
+            p.setPen(QPen(QColor(GRID), 1))
+            p.drawLine(QPointF(plot.left(), y), QPointF(plot.right(), y))
+            p.setPen(QColor(MUTED))
+            p.drawText(QRectF(0, y - 8, left - 8, 16), Qt.AlignRight | Qt.AlignVCenter,
+                       f"{vmin + span * i / 4:.3g}")
+        colors = (QColor(ACCENT), QColor(SECOND))
+        for data, color in ((self.train_loss, colors[0]), (self.dev_loss, colors[1])):
+            path = QPainterPath()
+            for index, value in enumerate(data):
+                x = plot.left() + plot.width() * index / max(1, len(data) - 1)
+                y = plot.bottom() - plot.height() * (value - vmin) / span
+                point = QPointF(x, y)
+                if index == 0:
+                    path.moveTo(point)
+                else:
+                    path.lineTo(point)
+            p.setPen(QPen(color, 2, Qt.SolidLine, Qt.RoundCap, Qt.RoundJoin))
+            p.drawPath(path)
+        p.setPen(colors[0]); p.drawText(QRectF(plot.left(), 4, 96, 18), Qt.AlignLeft, "Train loss")
+        p.setPen(colors[1]); p.drawText(QRectF(plot.left() + 98, 4, 100, 18), Qt.AlignLeft,
+                                        "Development NLL")
+        recall_color = QColor("#7db7ff")
+        best_color = QColor("#d6b4ff")
+        for data, color, pen_style in (
+                (self.dev_recall_ci_lower, recall_color, Qt.SolidLine),
+                (self.best_dev_recall_ci_lower, best_color, Qt.DashLine)):
+            if not any(self.dev_recall_ci_lower):
+                break
+            path = QPainterPath()
+            for index, value in enumerate(data):
+                x = plot.left() + plot.width() * index / max(1, len(data) - 1)
+                y = plot.bottom() - plot.height() * min(max(value, 0.0), 1.0)
+                point = QPointF(x, y)
+                if index == 0:
+                    path.moveTo(point)
+                else:
+                    path.lineTo(point)
+            p.setPen(QPen(color, 2 if pen_style == Qt.SolidLine else 1.5, pen_style,
+                          Qt.RoundCap, Qt.RoundJoin))
+            p.drawPath(path)
+        p.setPen(recall_color)
+        p.drawText(QRectF(plot.left() + 202, 4, 108, 18), Qt.AlignLeft, "Dev recall CI-L")
+        p.setPen(best_color)
+        p.drawText(QRectF(plot.left() + 312, 4, 92, 18), Qt.AlignLeft, "Best so far")
+        p.setPen(QColor(MUTED))
+        for i in range(5):
+            y = plot.bottom() - plot.height() * i / 4
+            p.drawText(QRectF(plot.right() + 4, y - 8, 42, 16), Qt.AlignLeft | Qt.AlignVCenter,
+                       f"{i * 25}%")
+        p.drawText(QRectF(plot.right() + 2, plot.top() - 18, 48, 16), Qt.AlignLeft | Qt.AlignVCenter,
+                   "CI-L")
+        p.setPen(QColor(MUTED))
+        p.drawText(QRectF(plot.left(), plot.bottom() + 5, plot.width() / 2, 18), Qt.AlignLeft,
+                   f"эпоха {self.epochs[0]}")
+        p.drawText(QRectF(plot.center().x(), plot.bottom() + 5, plot.width() / 2, 18), Qt.AlignRight,
+                   f"эпоха {self.epochs[-1]}")
+        p.end()
+
+
 def _steps(vmax: float) -> int:
     """Число делений шкалы, при котором подписи — целые числа."""
     if vmax <= 5:
@@ -402,3 +507,142 @@ class Heatmap(Chart):
                 p.drawText(QRectF(r.left() + cw * j - 10, r.bottom() + 4, cw + 20, 18), Qt.AlignHCenter, lab)
         p.drawText(QRectF(0, self.height() - 22, self.width(), 18), Qt.AlignHCenter,
                    "строки — истинный класс, столбцы — заключение")
+
+
+class NNScoreStream(Chart):
+    """Потоковый график оценок P(attack) последних N завершённых потоков.
+
+    Пороговые превышения отмечаются для обзора. Они не являются подтверждёнными
+    атаками и не запускают блокировку. Пунктир — порог кандидата.
+    """
+
+    def __init__(self, capacity=200):
+        super().__init__(200)
+        self.capacity = capacity
+        self.flows: list[dict] = []
+        self.threshold: float | None = None
+        self._hover_i: int | None = None
+
+    def push_flows(self, flows: list[dict], threshold: float | None = None):
+        self.flows = (self.flows + [f for f in flows if isinstance(f.get("score"), (int, float))])[-self.capacity:]
+        if threshold is not None:
+            self.threshold = float(threshold)
+        self.update()
+
+    def set_flows(self, flows: list[dict], threshold: float | None = None):
+        """Replace the displayed window with the current live inference window."""
+        self.flows = [f for f in flows if isinstance(f, dict)
+                      and isinstance(f.get("score"), (int, float))][-self.capacity:]
+        if threshold is not None:
+            self.threshold = float(threshold)
+        self.update()
+
+    def mouseMoveEvent(self, e):
+        r = self.plot()
+        x = e.position().x()
+        if self.flows and r.left() <= x <= r.right():
+            i = round((x - r.left()) / r.width() * (len(self.flows) - 1))
+            if 0 <= i < len(self.flows):
+                self._hover_i = i
+                f = self.flows[i]
+                udp_tag = " [UDP]" if f.get("is_udp") else ""
+                completion = f.get("completion_reason")
+                completion_tag = "\nЗавершение: тайм-аут бездействия 1 с" \
+                    if completion == "udp_idle_timeout_1s" else ""
+                QToolTip.showText(e.globalPosition().toPoint(),
+                                  f"Поток #{i + 1}{udp_tag}\nP(атака) = {f['score']:.4f}\n"
+                                  f"Статус кандидата: {f.get('verdict', '?')}{completion_tag}",
+                                  self)
+                return self.update()
+        self._hover_i = None
+        QToolTip.hideText()
+        self.update()
+
+    def leaveEvent(self, _):
+        self._hover_i = None
+        self.update()
+
+    def draw(self, p):
+        if not self.flows:
+            return False
+        r = self.plot()
+        self.y_grid(p, r, 1.0, "{:.2f}")
+        if self.threshold is not None and 0 <= self.threshold <= 1:
+            y_thr = r.bottom() - r.height() * self.threshold
+            p.setPen(QPen(QColor(ACCENT), 1, Qt.DashLine))
+            p.drawLine(QPointF(r.left(), y_thr), QPointF(r.right(), y_thr))
+            p.setPen(QColor(ACCENT))
+            p.drawText(QRectF(r.right() - 130, y_thr - 16, 126, 14), Qt.AlignRight, f"порог {self.threshold:.4f}")
+        n = len(self.flows)
+        COLORS = {"ALLOW": "#1f9d63", "REVIEW": "#d99a1c", "BLOCK": "#e5484d"}
+        UDP_RING = "#4dd0c4"
+        for i, f in enumerate(self.flows):
+            s = min(max(float(f["score"]), 0.0), 1.0)
+            x = r.left() + r.width() * i / max(n - 1, 1)
+            y = r.bottom() - r.height() * s
+            color = COLORS.get(f.get("verdict", "ALLOW"), MUTED)
+            radius = 6 if i == self._hover_i else 4
+            if f.get("is_udp"):
+                p.setPen(QPen(QColor(UDP_RING), 1.5))
+            else:
+                p.setPen(QPen(QColor(SURFACE), 1.5))
+            p.setBrush(QColor(color))
+            p.drawEllipse(QPointF(x, y), radius, radius)
+        self.legend(p, [("выше порога — обзор", "#d99a1c"),
+                        ("ниже порога", "#1f9d63"), ("UDP-кольцо", UDP_RING)])
+        p.setPen(QColor(MUTED))
+        p.drawText(QRectF(r.left(), r.bottom() + 4, r.width(), 18), Qt.AlignRight, f"последние {n} потоков →")
+
+
+class BenignUDPHistogram(Chart):
+    """Гистограмма оценок P(attack) для наблюдаемых UDP-потоков.
+
+    Локальные метки неизвестны; график не считает ложные срабатывания.
+    """
+
+    def __init__(self, bins: int = 40):
+        super().__init__(180)
+        self.bins = bins
+        self.scores: list[float] = []
+        self.threshold: float | None = None
+
+    def set_scores(self, scores: list[float], threshold: float | None = None):
+        self.scores = [float(s) for s in scores if isinstance(s, (int, float))]
+        if threshold is not None:
+            self.threshold = float(threshold)
+        self.update()
+
+    def draw(self, p):
+        if not self.scores:
+            return False
+        r = self.plot()
+        counts = [0] * self.bins
+        for s in self.scores:
+            bi = min(int(s * self.bins), self.bins - 1)
+            counts[bi] += 1
+        vmax = max(counts) or 1
+        self.y_grid(p, r, vmax, steps=4)
+        bw = r.width() / self.bins
+        for i, cnt in enumerate(counts):
+            x = r.left() + bw * i
+            h = r.height() * cnt / vmax
+            bar = QRectF(x + 1, r.bottom() - h, bw - 2, max(h, 1))
+            is_tail = (self.threshold is not None and (i + 1) / self.bins > self.threshold)
+            p.setPen(Qt.NoPen)
+            p.setBrush(QColor(SECOND if is_tail else "#1f9d63"))
+            p.drawRoundedRect(bar, 2, 2)
+        if self.threshold is not None:
+            thr_x = r.left() + r.width() * self.threshold
+            p.setPen(QPen(QColor("#e5484d"), 1.5, Qt.DashLine))
+            p.drawLine(QPointF(thr_x, r.top()), QPointF(thr_x, r.bottom()))
+            p.setPen(QColor("#e5484d"))
+            p.drawText(QRectF(thr_x + 4, r.top() + 2, 80, 14), Qt.AlignLeft, f"порог {self.threshold:.4f}")
+        above = sum(1 for s in self.scores if self.threshold is not None and s > self.threshold)
+        total = len(self.scores)
+        pct = above / total * 100 if total else 0
+        p.setPen(QColor(MUTED))
+        p.drawText(QRectF(r.left(), r.bottom() + 4, r.width(), 18), Qt.AlignLeft,
+                   f"UDP потоков: {total}")
+        p.drawText(QRectF(r.left(), r.bottom() + 4, r.width(), 18), Qt.AlignRight,
+                   f"выше порога: {above} ({pct:.1f}%)")
+        self.legend(p, [("ниже порога", "#1f9d63"), ("выше порога", SECOND)])

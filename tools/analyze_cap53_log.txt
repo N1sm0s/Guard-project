@@ -1,0 +1,33 @@
+=== CTU-53 UDP attacks ===
+  Total UDP attacks: 1788
+  Rule-covered: 983
+  Uncovered: 805
+  Rule FP on UDP benign: 0
+
+  Uncovered attack breakdown:
+    sustained: 272
+    very_eph: 102
+    medium: 431
+
+  Uncovered medium-dur attacks (431):
+    no_resp: 19
+    pkts: p5=0.000 p50=0.000 p95=0.170
+    bytes: p5=-0.210 p50=0.421 p95=0.466
+    dir_asym: p5=-0.463 p50=0.129 p95=0.806
+
+  Medium-dur benign (1166):
+    no_resp: 0
+    pkts: p5=0.000 p50=0.000 p95=0.000
+    bytes: p5=-0.329 p50=-0.023 p95=0.563
+    dir_asym: p5=-0.471 p50=0.024 p95=0.568
+
+=== Candidate Rule 3 candidates ===
+  med+no_resp: TP_53=19 FP_53=0 FP_54=1
+  med+small_bytes: TP_53=15 FP_53=0 FP_54=0
+
+=== Rule 2 relaxed (drop small_bytes) ===
+  very_eph+no_resp (no small_bytes): NEW_TP=3 FP_53=3 FP_54=3
+
+=== CTU-53 TCP attacks ===
+  Total TCP attacks: 380
+  TCP total flows: 3426

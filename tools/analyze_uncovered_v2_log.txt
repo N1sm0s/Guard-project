@@ -1,0 +1,30 @@
+Uncovered sustained: 272
+Uncovered very_eph: 102
+Uncovered medium: 431
+
+=== Uncovered sustained (272) — why not covered by R1c? ===
+  fail_pkts_AND_no_resp: 255
+  fail_dir_asym: 94
+  fail_both: 77
+
+  dir_asym for fail_dir_asym: p5=-0.471 p50=-0.463 p95=-0.404
+  UDP benign with dir_asym <= -0.40: 198 / 4569
+
+  dir_asym>-0.50: new_TP=17 new_FP_53=2 FP_54=20
+  dir_asym>-0.60: new_TP=17 new_FP_53=2 FP_54=20
+  dir_asym>-0.70: new_TP=17 new_FP_53=2 FP_54=20
+  dir_asym>-1.00: new_TP=17 new_FP_53=2 FP_54=20
+  dir_asym>-2.00: new_TP=17 new_FP_53=2 FP_54=20
+  dir_asym>-5.00: new_TP=17 new_FP_53=2 FP_54=20
+
+=== Uncovered very_eph (102) — why not covered by R2? ===
+  fail_no_resp: 99
+  fail_small_bytes: 102
+  fail_both: 99
+
+  very_eph alone: new_TP=102 FP_53=3391 FP_54=18399
+  very_eph+no_resp: new_TP=3 FP_53=3 FP_54=3
+
+=== Feature comparison: uncovered attacks vs UDP benign ===
+  Uncovered attacks: 805
+  UDP benign: 4569

@@ -13,7 +13,7 @@ from pathlib import Path
 
 import psutil
 
-from integrityguard.network_ai import NetworkTelemetry
+from integrityguard.network_telemetry import NetworkTelemetry
 from integrityguard.network_evidence import NetworkEventLog
 
 

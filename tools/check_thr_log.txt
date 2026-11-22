@@ -1,0 +1,74 @@
+Checkpoint epoch: ?
+Best val: ?
+
+=== CTU-53: 2168 attacks, 4569 UDP benign ===
+     thr   recall   FP_UDP    CI_hi  pass?
+    0.50   0.8999     2684  60.163%   FAIL
+    0.60   0.8681     1928  43.635%   FAIL
+    0.70   0.7772     1255  28.781%   FAIL
+    0.75   0.7154     1114  25.648%   FAIL
+    0.80   0.6794      846  19.669%   FAIL
+    0.85   0.6587      697  16.327%   FAIL
+    0.88   0.6476      592  13.962%   FAIL
+    0.90   0.6462      414   9.928%   FAIL
+    0.92   0.6421      348   8.422%   FAIL
+    0.95   0.6324      220   5.475%   FAIL
+
+  Max UDP benign score: 0.9924
+  At thr=0.9924 (0 FP): recall=0.4866
+
+  Attack score distribution:
+    p50 = 0.9917
+    p60 = 1.0000
+    p70 = 1.0000
+    p75 = 1.0000
+    p80 = 1.0000
+    p85 = 1.0000
+    p90 = 1.0000
+    p95 = 1.0000
+  % attacks scoring >= 0.80: 67.9%
+  % attacks scoring >= 0.85: 65.9%
+  % attacks scoring >= 0.90: 64.6%
+  % attacks scoring >= 0.92: 64.2%
+
+  UDP benign score p99.9=0.9901 p999=0.9901
+  UDP benign scores > 0.80: 846
+  UDP benign scores > 0.85: 697
+  UDP benign scores > 0.90: 414
+  UDP benign scores > 0.92: 348
+
+=== CTU-54: 40003 attacks, 20400 UDP benign ===
+     thr   recall   FP_UDP    CI_hi  pass?
+    0.50   0.9955     3790  19.118%   FAIL
+    0.60   0.9875     2571  13.065%   FAIL
+    0.70   0.9735     2004  10.240%   FAIL
+    0.75   0.9538     1948   9.960%   FAIL
+    0.80   0.9281     1777   9.106%   FAIL
+    0.85   0.8825     1530   7.870%   FAIL
+    0.88   0.8464     1366   7.047%   FAIL
+    0.90   0.8393     1303   6.731%   FAIL
+    0.92   0.8233     1124   5.831%   FAIL
+    0.95   0.8040      574   3.050%   FAIL
+
+  Max UDP benign score: 1.0000
+  At thr=1.0000 (0 FP): recall=0.0000
+
+  Attack score distribution:
+    p50 = 0.9979
+    p60 = 0.9979
+    p70 = 0.9979
+    p75 = 0.9979
+    p80 = 0.9979
+    p85 = 0.9984
+    p90 = 0.9984
+    p95 = 0.9984
+  % attacks scoring >= 0.80: 92.8%
+  % attacks scoring >= 0.85: 88.3%
+  % attacks scoring >= 0.90: 83.9%
+  % attacks scoring >= 0.92: 82.3%
+
+  UDP benign score p99.9=0.9903 p999=0.9903
+  UDP benign scores > 0.80: 1777
+  UDP benign scores > 0.85: 1530
+  UDP benign scores > 0.90: 1303
+  UDP benign scores > 0.92: 1124

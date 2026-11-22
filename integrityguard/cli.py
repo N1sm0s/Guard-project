@@ -96,7 +96,7 @@ def cmd_train_candidate(a):
 
 def cmd_network_capture(a):
     import psutil
-    from .network_ai import NetworkTelemetry
+    from .network_telemetry import NetworkTelemetry
     from .network_evidence import NetworkEventLog
     telemetry = NetworkTelemetry()
     snapshot = telemetry.sample(psutil)

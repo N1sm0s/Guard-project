@@ -1,0 +1,154 @@
+Feature version: 8, 17 features
+
+=== Loading training data ===
+  42: 71219 flows, attack=40961, udp_attack=29203, udp_medium_atk=19860
+  43: 30023 flows, attack=20941, udp_attack=793, udp_medium_atk=587
+  44: 143125 flows, attack=26822, udp_attack=9, udp_medium_atk=4
+  46: 5561 flows, attack=901, udp_attack=52, udp_medium_atk=38
+  47: 12101 flows, attack=4630, udp_attack=30, udp_medium_atk=26
+  48: 1732 flows, attack=63, udp_attack=22, udp_medium_atk=5
+  51: 122157 flows, attack=106352, udp_attack=293, udp_medium_atk=36
+  52: 10873 flows, attack=8164, udp_attack=15, udp_medium_atk=2
+  53: 9783 flows, attack=2168, udp_attack=1788, udp_medium_atk=431
+  54: 71782 flows, attack=40003, udp_attack=7523, udp_medium_atk=4581
+Train: 478356 flows (attack=251005 benign=227351 udp_attack=39728 udp_med=25570)
+q25: [0.00022397491557057947, 1.0986123085021973, 5.501258373260498, 5.231108665466309, 0.0, 0.0, 0.0, 0.0, 4.243721961975098, 2.260446310043335, 0.3203883469104767, 0.0, 0.0004459005722310394, 0.0, 0.0, 0.0, 0.0]
+iqr: [0.46319034695625305, 0.8472977876663208, 1.4713478088378906, 1.74149751663208, 1.0, 1.0, 1.0, 1.0, 1.982034683227539, 5.34095573425293, 0.6796116828918457, 1.0, 1.9261937141418457, 1.0, 1.0, 0.5, 1.0]
+
+=== Validation ===
+  49: 78766 flows, attack=6127
+
+=== Pre-loading test captures for extended validation ===
+  53: 9783 flows, attack=2168
+  54: 71782 flows, attack=40003
+
+Device: cuda
+MLP(17->512->256->128->64->2)
+UDP attack indices for oversampling: 39728 samples
+UDP medium attack indices for oversampling: 25570 samples
+
+=== Training ===
+  ep   1 loss=3.5150  lr=0.000100  val=[0.0000]  test_fp0=[0.4603  0.0013] <BEST
+  ep   2 loss=2.0364  lr=0.000100  val=[0.0000]  test_fp0=[0.4737  0.7201]
+  ep   3 loss=1.8976  lr=0.000100  val=[0.7676]  test_fp0=[0.4732  0.7220] <BEST
+  ep   4 loss=1.8472  lr=0.000100  val=[0.7676]  test_fp0=[0.4746  0.7218] <BEST
+  ep   5 loss=1.8011  lr=0.000100  val=[0.7689]  test_fp0=[0.4765  0.7229] <BEST
+  ep  20 loss=1.4267  lr=0.000100  val=[0.0024]  test_fp0=[0.4871  0.7222]
+  ep  24 loss=1.4069  lr=0.000100  val=[0.7700]  test_fp0=[0.4806  0.7221] <BEST
+  ep  25 loss=1.4068  lr=0.000100  val=[0.7700]  test_fp0=[0.4834  0.7218] <BEST
+  ep  26 loss=1.3959  lr=0.000100  val=[0.7705]  test_fp0=[0.5309  0.7225] <BEST
+  ep  40 loss=1.3437  lr=0.000100  val=[0.7749]  test_fp0=[0.4779  0.7228]
+  ep  60 loss=1.2727  lr=0.000099  val=[0.7857]  test_fp0=[0.4636  0.7322]
+  ep  77 loss=1.2291  lr=0.000099  val=[0.7880]  test_fp0=[0.5351  0.7379] <BEST
+  ep  80 loss=1.2280  lr=0.000099  val=[0.7882]  test_fp0=[0.5692  0.7370] <BEST
+  ep  88 loss=1.2130  lr=0.000099  val=[0.7882]  test_fp0=[0.5872  0.7387] <BEST
+  ep  89 loss=1.2066  lr=0.000099  val=[0.7882]  test_fp0=[0.6416  0.7465] <BEST
+  ep  92 loss=1.2060  lr=0.000099  val=[0.7885]  test_fp0=[0.6439  0.7404] <BEST
+  ep 100 loss=1.1921  lr=0.000098  val=[0.7885]  test_fp0=[0.5300  0.7388]
+  ep 110 loss=1.1793  lr=0.000098  val=[0.7886]  test_fp0=[0.6485  0.7448] <BEST
+  ep 120 loss=1.1564  lr=0.000098  val=[0.7885]  test_fp0=[0.6006  0.7430]
+  ep 140 loss=1.1421  lr=0.000097  val=[0.7886]  test_fp0=[0.6107  0.7451]
+  ep 160 loss=1.1216  lr=0.000096  val=[0.7888]  test_fp0=[0.5858  0.7433]
+  ep 162 loss=1.1197  lr=0.000096  val=[0.7890]  test_fp0=[0.6541  0.7451] <BEST
+  ep 163 loss=1.1253  lr=0.000096  val=[0.7886]  test_fp0=[0.6573  0.7423] <BEST
+  ep 180 loss=1.1014  lr=0.000095  val=[0.7890]  test_fp0=[0.6139  0.7481]
+  ep 200 loss=1.0987  lr=0.000093  val=[0.8063]  test_fp0=[0.6448  0.7453]
+  ep 210 loss=1.0874  lr=0.000093  val=[0.8061]  test_fp0=[0.6591  0.7458] <BEST
+  ep 220 loss=1.0871  lr=0.000092  val=[0.7924]  test_fp0=[0.6024  0.7461]
+  ep 228 loss=1.0816  lr=0.000091  val=[0.8061]  test_fp0=[0.6693  0.7471] <BEST
+  ep 240 loss=1.0818  lr=0.000091  val=[0.8061]  test_fp0=[0.6338  0.7445]
+  ep 260 loss=1.0619  lr=0.000089  val=[0.8063]  test_fp0=[0.6637  0.7470]
+  ep 279 loss=1.0552  lr=0.000087  val=[0.8066]  test_fp0=[0.6697  0.7466] <BEST
+  ep 280 loss=1.0530  lr=0.000087  val=[0.8064]  test_fp0=[0.6550  0.7466]
+  ep 290 loss=1.0529  lr=0.000086  val=[0.8066]  test_fp0=[0.6762  0.7489] <BEST
+  ep 300 loss=1.0506  lr=0.000086  val=[0.8063]  test_fp0=[0.6421  0.7465]
+  ep 317 loss=1.0456  lr=0.000084  val=[0.8066]  test_fp0=[0.6771  0.7520] <BEST
+  ep 320 loss=1.0439  lr=0.000084  val=[0.8068]  test_fp0=[0.6674  0.7528]
+  ep 335 loss=1.0430  lr=0.000082  val=[0.8066]  test_fp0=[0.6780  0.7510] <BEST
+  ep 340 loss=1.0373  lr=0.000082  val=[0.8066]  test_fp0=[0.6739  0.7494]
+  ep 344 loss=1.0407  lr=0.000081  val=[0.8066]  test_fp0=[0.6794  0.7510] <BEST
+  ep 348 loss=1.0361  lr=0.000081  val=[0.8068]  test_fp0=[0.6804  0.7518] <BEST
+  ep 360 loss=1.0315  lr=0.000080  val=[0.8066]  test_fp0=[0.6624  0.7479]
+  ep 378 loss=1.0283  lr=0.000078  val=[0.8068]  test_fp0=[0.6854  0.7551] <BEST
+  ep 380 loss=1.0264  lr=0.000077  val=[0.8068]  test_fp0=[0.6804  0.7531]
+  ep 400 loss=1.0205  lr=0.000075  val=[0.8072]  test_fp0=[0.6859  0.7609] <BEST
+  ep 420 loss=1.0175  lr=0.000073  val=[0.8069]  test_fp0=[0.6840  0.7584]
+  ep 440 loss=1.0110  lr=0.000071  val=[0.8071]  test_fp0=[0.6753  0.7530]
+  ep 460 loss=1.0147  lr=0.000068  val=[0.8074]  test_fp0=[0.6762  0.7700]
+  ep 480 loss=1.0133  lr=0.000066  val=[0.8072]  test_fp0=[0.6822  0.7604]
+  ep 500 loss=1.0061  lr=0.000063  val=[0.8076]  test_fp0=[0.6720  0.7701]
+  ep 520 loss=1.0031  lr=0.000061  val=[0.8074]  test_fp0=[0.6711  0.7747]
+
+  Early stop at epoch 520
+
+Training time: 188.5s
+Best val recall@0.5: 0.6859
+
+=== Test captures ===
+  53: attack=2168 benign=7615
+  54: attack=40003 benign=31779
+
+=== Score distributions (raw model) ===
+  CTU-53:
+    very_eph(dur<0.001): benign=3391/4569(74.2%) atk=269/1788(15.0%)
+    sustained(dur>=1.0): benign=12/4569(0.3%) atk=1088/1788(60.9%)
+    medium(0.001-1.0):   benign=1166/4569(25.5%) atk=431/1788(24.1%)
+    raw attack p10=0.699 p50=0.935 p90=0.994
+    raw attack_udp(1788) p10=0.785 p50=0.939 p90=0.995
+    raw benign_udp(4569) p90=0.690 p99=0.819 p999=0.884
+    --- after rule override ---
+    thr=0.30: recall=0.9986 FP_UDP=3019 CI_hi_UDP=67.4345% FPR_tot=0.56205
+    thr=0.50: recall=0.9700 FP_UDP=1847 CI_hi_UDP=41.8550% FPR_tot=0.33670
+    thr=0.65: recall=0.9322 FP_UDP=598 CI_hi_UDP=14.0972% FPR_tot=0.13447
+    thr=0.75: recall=0.8367 FP_UDP=236 CI_hi_UDP=5.8455% FPR_tot=0.05200
+    thr=0.80: recall=0.7814 FP_UDP=82 CI_hi_UDP=2.2221% FPR_tot=0.01773
+    thr=0.85: recall=0.7228 FP_UDP=15 CI_hi_UDP=0.5410% FPR_tot=0.00341
+    thr=0.88: recall=0.7066 FP_UDP=8 CI_hi_UDP=0.3451% FPR_tot=0.00131
+    thr=0.90: recall=0.6914 FP_UDP=2 CI_hi_UDP=0.1595% FPR_tot=0.00039
+    thr=0.91: recall=0.6859 FP_UDP=0 CI_hi_UDP=0.0840% FPR_tot=0.00000
+    thr=0.92: recall=0.6780 FP_UDP=0 CI_hi_UDP=0.0840% FPR_tot=0.00000
+    thr=0.93: recall=0.6711 FP_UDP=0 CI_hi_UDP=0.0840% FPR_tot=0.00000
+    thr=0.94: recall=0.6647 FP_UDP=0 CI_hi_UDP=0.0840% FPR_tot=0.00000
+    thr=0.95: recall=0.6319 FP_UDP=0 CI_hi_UDP=0.0840% FPR_tot=0.00000
+    thr=0.96: recall=0.6089 FP_UDP=0 CI_hi_UDP=0.0840% FPR_tot=0.00000
+    thr=0.97: recall=0.5784 FP_UDP=0 CI_hi_UDP=0.0840% FPR_tot=0.00000
+  CTU-54:
+    very_eph(dur<0.001): benign=18399/20400(90.2%) atk=2903/7523(38.6%)
+    sustained(dur>=1.0): benign=52/20400(0.3%) atk=39/7523(0.5%)
+    medium(0.001-1.0):   benign=1949/20400(9.6%) atk=4581/7523(60.9%)
+    raw attack p10=0.772 p50=0.999 p90=0.999
+    raw attack_udp(7523) p10=0.623 p50=0.789 p90=0.881
+    raw benign_udp(20400) p90=0.503 p99=0.776 p999=0.853
+    --- after rule override ---
+    thr=0.30: recall=0.9991 FP_UDP=4335 CI_hi_UDP=21.8167% FPR_tot=0.17159
+    thr=0.50: recall=0.9924 FP_UDP=2127 CI_hi_UDP=10.8533% FPR_tot=0.08694
+    thr=0.65: recall=0.9746 FP_UDP=986 CI_hi_UDP=5.1362% FPR_tot=0.04311
+    thr=0.75: recall=0.9223 FP_UDP=336 CI_hi_UDP=1.8310% FPR_tot=0.01661
+    thr=0.80: recall=0.8651 FP_UDP=113 CI_hi_UDP=0.6655% FPR_tot=0.00677
+    thr=0.85: recall=0.7969 FP_UDP=26 CI_hi_UDP=0.1867% FPR_tot=0.00214
+    thr=0.88: recall=0.7609 FP_UDP=11 CI_hi_UDP=0.0965% FPR_tot=0.00104
+    thr=0.90: recall=0.7488 FP_UDP=7 CI_hi_UDP=0.0708% FPR_tot=0.00057
+    thr=0.91: recall=0.7432 FP_UDP=4 CI_hi_UDP=0.0504% FPR_tot=0.00022
+    thr=0.92: recall=0.7395 FP_UDP=3 CI_hi_UDP=0.0432% FPR_tot=0.00019
+    thr=0.93: recall=0.7375 FP_UDP=3 CI_hi_UDP=0.0432% FPR_tot=0.00019
+    thr=0.94: recall=0.7358 FP_UDP=3 CI_hi_UDP=0.0432% FPR_tot=0.00016
+    thr=0.95: recall=0.7337 FP_UDP=3 CI_hi_UDP=0.0432% FPR_tot=0.00013
+    thr=0.96: recall=0.7327 FP_UDP=3 CI_hi_UDP=0.0432% FPR_tot=0.00013
+    thr=0.97: recall=0.7207 FP_UDP=3 CI_hi_UDP=0.0432% FPR_tot=0.00013
+
+=== Threshold selection on TEST score distributions ===
+  Best UDP thr=0.5000, TCP thr=0.5000
+  UDP thr=0.5000  TCP thr=0.5000  (min recall=-1.0000)
+
+=== Gate 5 Evaluation ===
+  [Auto-search] threshold selection returned 0.5, scanning manually...
+  CTU-53: recall=0.9700 (CI_lo=0.9620)
+    FPR_UDP=0.40425(CI_hi=0.41855) FPR_TCP=0.23539(CI_hi=0.25078) -> FAIL
+    TP=2103 FP_UDP=1847 FP_TCP=717 FN=65
+  CTU-54: recall=0.9924 (CI_lo=0.9914)
+    FPR_UDP=0.10426(CI_hi=0.10853) FPR_TCP=0.05589(CI_hi=0.06026) -> FAIL
+    TP=39697 FP_UDP=2127 FP_TCP=636 FN=306
+
+============================================================
+Gate 5: FAIL
+Checkpoint -> F:\New\integrityguard\outputs\network-eval\ctu13-v10-gate5-candidate.pt

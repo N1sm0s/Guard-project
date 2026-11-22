@@ -10,7 +10,7 @@ rem train.py, which force torch.set_num_threads(1) and never call .cuda()).
 rem Building from .venv-build with the CPU-only torch wheel keeps the
 rem packaged app lean without touching your training environment.
 if not exist ".venv-build\Scripts\python.exe" (
-    echo Creating .venv-build (CPU-only packaging environment)...
+    echo Creating .venv-build CPU-only packaging environment...
     python -m venv .venv-build || goto :error
     ".venv-build\Scripts\python.exe" -m pip install --upgrade pip || goto :error
     ".venv-build\Scripts\python.exe" -m pip install torch --index-url https://download.pytorch.org/whl/cpu || goto :error

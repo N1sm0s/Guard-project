@@ -3,7 +3,8 @@
 [CmdletBinding(SupportsShouldProcess)]
 param(
     [Parameter(Mandatory)] [ValidateSet('Block', 'Unblock')] [string] $Action,
-    [Parameter(Mandatory)] [string] $Address
+    [Parameter(Mandatory)] [string] $Address,
+    [ValidateSet('Manual', 'Auto')] [string] $Source = 'Manual'
 )
 $ErrorActionPreference = 'Stop'
 $ip = $null
@@ -16,11 +17,11 @@ if ($Address -notmatch '^[0-9a-fA-F:.]+$' -or
     throw 'Enter one canonical remote IP address.'
 }
 $store = 'PersistentStore'
-$group = 'IntegrityGuard Manual'
+$group = "IntegrityGuard $Source"
 $rules = @{}
 $existingRules = @(Get-NetFirewallRule -PolicyStore $store -ErrorAction Stop)
 foreach ($direction in @('Inbound', 'Outbound')) {
-    $name = "IntegrityGuard.Manual.$direction.$Address"
+    $name = "IntegrityGuard.$Source.$direction.$Address"
     $matches = @($existingRules | Where-Object Name -eq $name)
     if ($matches.Count -gt 1) {
         throw "Multiple firewall rules match the operation: $name"
@@ -40,7 +41,7 @@ foreach ($direction in @('Inbound', 'Outbound')) {
     $rules[$direction] = $existing
 }
 foreach ($direction in @('Inbound', 'Outbound')) {
-    $name = "IntegrityGuard.Manual.$direction.$Address"
+    $name = "IntegrityGuard.$Source.$direction.$Address"
     if (-not $PSCmdlet.ShouldProcess($Address, "$Action $direction traffic")) { continue }
     $existing = $rules[$direction]
     if ($Action -eq 'Block') {

@@ -11,7 +11,10 @@ class ApplicationInstance:
         directory = Path(directory or Path(os.environ.get("LOCALAPPDATA", Path.home())) / "IntegrityGuard")
         directory.mkdir(parents=True, exist_ok=True)
         self.lock = QLockFile(str(directory / "gui.lock"))
-        self.lock.setStaleLockTime(0)
+        # Allow Qt to remove a lock left by a process that exited abnormally.
+        # With 0, QLockFile disables stale-lock cleanup; a dead PID then makes
+        # every scheduled restart silently return from main() as a duplicate.
+        self.lock.setStaleLockTime(30_000)
         self.server_name = server_name
         self.server = QLocalServer()
 

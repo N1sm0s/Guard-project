@@ -229,14 +229,28 @@ class IntegrityGuard:
         return extract(ref, cand, index, probe)
 
     # ---------------------------------------------------------------- проверка
-    def check(self, pkg_dir, stage="build", index_path=None, strict=False) -> dict:
-        """Проверка кандидата относительно зарегистрированного эталона. Возвращает вердикт (dict)."""
+    def check(self, pkg_dir, stage="build", index_path=None, strict=False,
+              progress_cb=None) -> dict:
+        """Проверка кандидата относительно зарегистрированного эталона. Возвращает вердикт (dict).
+
+        progress_cb(step: int, text: str) — необязательный колбэк для живого прогресса в GUI.
+        """
+        def _progress(step, text):
+            if progress_cb is not None:
+                try:
+                    progress_cb(step, text)
+                except Exception:
+                    pass
+
         t0 = time.perf_counter()
+        _progress(1, "Загрузка пакета-кандидата…")
         cand = load_package(pkg_dir, self.key)
+        _progress(2, "Запрос публичных уязвимостей (OSV)…")
         intel = self._public_intel(cand.deps)
+        _progress(3, "Поиск доверенного эталона…")
         base = self._base(cand.name)
         if not (base / "package").exists():
-            ev = self.assess_unbaselined(pkg_dir, stage, intel)
+            ev = self.assess_unbaselined(pkg_dir, stage, intel, candidate=cand)
             if strict and ev["verdict"] == REVIEW:
                 ev["verdict"] = BLOCK
                 ev["rules"].append("строгий режим: пакет без доверенного эталона не допускается")
@@ -247,7 +261,7 @@ class IntegrityGuard:
             cand.signed_ok = ref.signed_ok = True
         index = json.loads(Path(index_path).read_text(encoding="utf-8-sig")) if index_path else self.index()
         ev = {"time": _now(), "stage": stage, "package": cand.name, "version": cand.version,
-              "baseline_version": ref.version, "fingerprint": fingerprint(pkg_dir), "rules": [],
+              "baseline_version": ref.version, "fingerprint": cand.fingerprint, "rules": [],
               "hash_control": bool(hash_baseline(ref, cand, index)), "public_intel": intel}
         if no_key:
             ev["rules"].append("ключ подписи не задан: подпись пакета не проверялась")
@@ -270,7 +284,7 @@ class IntegrityGuard:
             ev["rules"].append("модель сериализована небезопасным pickle (возможно исполнение кода при загрузке)")
             ev["timing_ms"] = {"total": round(1000 * (time.perf_counter() - t0), 1)}
             return self._apply_public_intel(ev, intel)
-        if fingerprint(pkg_dir) == fingerprint(base / "package"):
+        if cand.fingerprint == ref.fingerprint:
             # Exact byte-for-byte trusted baseline is a deterministic identity match;
             # the learned classifier must not override this provenance check.
             ev.update(verdict=ALLOW, score=0.0, risk_score=0, threat="clean",
@@ -279,6 +293,7 @@ class IntegrityGuard:
                       suspects=[], layer_anomaly=[], actions=[], baseline_match=True,
                       timing_ms={"total": round(1000 * (time.perf_counter() - t0), 1)})
             return self._apply_public_intel(ev, intel)
+        _progress(4, "Анализ структуры и исходного кода…")
         source_anomalies = opaque_source_anomalies(ref, cand)
         if source_anomalies:
             names = ", ".join(item["module"] for item in source_anomalies[:5])
@@ -289,8 +304,10 @@ class IntegrityGuard:
             ctrl = base / "control.npz"
             self._probes[cand.name] = BehaviorProbe(ref.state, *load_control(ctrl)) if ctrl.exists() else None
         probe = self._probes[cand.name]
+        _progress(5, "Извлечение признаков для анализа весов…")
         sample = extract(ref, cand, index, probe)
         t1 = time.perf_counter()
+        _progress(6, "Анализ нейронной сетью…")
         with torch.no_grad():
             out = self.model(collate([sample]))
         probs = torch.softmax(out["logits"][0], -1)
@@ -337,7 +354,7 @@ class IntegrityGuard:
                              "total": round(1000 * (t2 - t0), 1)})
         return self._apply_public_intel(ev, intel)
 
-    def assess_unbaselined(self, pkg_dir, stage="deploy", public_intel=None) -> dict:
+    def assess_unbaselined(self, pkg_dir, stage="deploy", public_intel=None, candidate=None) -> dict:
         """Record an explicit, unscored result when no trusted reference exists.
 
         First sighting and a locally generated signature are not trust anchors.
@@ -345,7 +362,7 @@ class IntegrityGuard:
         detector and risk score remain unavailable until a reference is found.
         """
         t0 = time.perf_counter()
-        cand = load_package(pkg_dir, self.key)
+        cand = candidate if candidate is not None else load_package(pkg_dir, self.key)
         intel = public_intel if public_intel is not None else self._public_intel(cand.deps)
         rules: list[str] = ["доверенный эталон не найден; сравнение целостности и числовая оценка не выполнялись"]
         facts = {"manifest_parsed": True, "signature_verified": bool(cand.signed_ok) if self.key else None,

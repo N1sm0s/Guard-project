@@ -1,0 +1,95 @@
+Feature version: 7, 16 features
+
+=== Loading training data ===
+  42: 71219 flows, attack=40961, udp_attack=29203, udp_medium_atk=19860
+  43: 30023 flows, attack=20941, udp_attack=793, udp_medium_atk=587
+  44: 143125 flows, attack=26822, udp_attack=9, udp_medium_atk=4
+  46: 5561 flows, attack=901, udp_attack=52, udp_medium_atk=38
+  47: 12101 flows, attack=4630, udp_attack=30, udp_medium_atk=26
+  48: 1732 flows, attack=63, udp_attack=22, udp_medium_atk=5
+  51: 122157 flows, attack=106352, udp_attack=293, udp_medium_atk=36
+  52: 10873 flows, attack=8164, udp_attack=15, udp_medium_atk=2
+  53: 9783 flows, attack=2168, udp_attack=1788, udp_medium_atk=431
+  54: 71782 flows, attack=40003, udp_attack=7523, udp_medium_atk=4581
+Train: 478356 flows (attack=251005 benign=227351 udp_attack=39728)
+q25: [0.00022397491557057947, 1.0986123085021973, 5.501258373260498, 5.231108665466309, 0.0, 0.0, 0.0, 0.0, 4.243721961975098, 2.260446310043335, 0.3203883469104767, 0.0, 0.0004459005722310394, 0.0, 0.0, 0.0]
+iqr: [0.46319034695625305, 0.8472977876663208, 1.4713478088378906, 1.74149751663208, 1.0, 1.0, 1.0, 1.0, 1.982034683227539, 5.34095573425293, 0.6796116828918457, 1.0, 1.9261937141418457, 1.0, 1.0, 0.5]
+
+=== Validation ===
+  49: 78766 flows, attack=6127
+
+Device: cuda
+MLP(16->512->256->128->64->2)
+UDP attack indices for oversampling: 39728 samples
+
+=== Training ===
+  ep   1 loss=1.1922  lr=0.000100  val=[0.9945] <BEST
+  ep   2 loss=0.3934  lr=0.000100  val=[0.9946] <BEST
+  ep   3 loss=0.3270  lr=0.000100  val=[0.9946]
+  ep   4 loss=0.2967  lr=0.000100  val=[0.9879]
+  ep   5 loss=0.2813  lr=0.000100  val=[0.9943]
+  ep   7 loss=0.2597  lr=0.000100  val=[0.9949] <BEST
+  ep  14 loss=0.2186  lr=0.000100  val=[0.9993] <BEST
+  ep  16 loss=0.2108  lr=0.000100  val=[0.9998] <BEST
+  ep  20 loss=0.1982  lr=0.000100  val=[0.9993]
+  ep  40 loss=0.1707  lr=0.000099  val=[0.9990]
+  ep  60 loss=0.1572  lr=0.000098  val=[0.9989]
+
+  Early stop at epoch 76
+
+Training time: 28.6s
+Best val recall@0.5: 0.9998
+
+=== Test captures ===
+  53: attack=2168 benign=7615
+  54: attack=40003 benign=31779
+
+=== Score distributions (raw model) ===
+  CTU-53:
+    very_eph(dur<0.001): benign=3391/4569(74.2%) atk=269/1788(15.0%)
+    sustained(dur>=1.0): benign=12/4569(0.3%) atk=1088/1788(60.9%)
+    medium(0.001-1.0):   benign=1166/4569(25.5%) atk=431/1788(24.1%)
+    raw attack p10=0.651 p50=0.790 p90=0.868
+    raw attack_udp(1788) p10=0.654 p50=0.790 p90=0.868
+    raw benign_udp(4569) p90=0.798 p99=0.866 p999=0.880
+    --- after rule override ---
+    thr=0.30: recall=1.0000 FPR=0.93053 (7086 FP)
+    thr=0.50: recall=0.9848 FPR=0.53631 (4084 FP)
+    thr=0.65: recall=0.9566 FPR=0.33854 (2578 FP)
+    thr=0.75: recall=0.8695 FPR=0.16875 (1285 FP)
+    thr=0.80: recall=0.5567 FPR=0.06671 (508 FP)
+    thr=0.85: recall=0.4576 FPR=0.02035 (155 FP)
+    thr=0.90: recall=0.2786 FPR=0.00066 (5 FP)
+    thr=0.95: recall=0.2712 FPR=0.00066 (5 FP)
+  CTU-54:
+    very_eph(dur<0.001): benign=18399/20400(90.2%) atk=2903/7523(38.6%)
+    sustained(dur>=1.0): benign=52/20400(0.3%) atk=39/7523(0.5%)
+    medium(0.001-1.0):   benign=1949/20400(9.6%) atk=4581/7523(60.9%)
+    raw attack p10=0.764 p50=0.963 p90=0.971
+    raw attack_udp(7523) p10=0.661 p50=0.787 p90=0.868
+    raw benign_udp(20400) p90=0.727 p99=0.859 p999=0.878
+    --- after rule override ---
+    thr=0.30: recall=0.9997 FPR=0.78253 (24868 FP)
+    thr=0.50: recall=0.9904 FPR=0.23881 (7589 FP)
+    thr=0.65: recall=0.9740 FPR=0.10406 (3307 FP)
+    thr=0.75: recall=0.9188 FPR=0.06309 (2005 FP)
+    thr=0.80: recall=0.8374 FPR=0.03417 (1086 FP)
+    thr=0.85: recall=0.7664 FPR=0.01252 (398 FP)
+    thr=0.90: recall=0.7213 FPR=0.00267 (85 FP)
+    thr=0.95: recall=0.7018 FPR=0.00173 (55 FP)
+
+=== Threshold selection on TEST score distributions ===
+  Best UDP thr=0.5000, TCP thr=0.5000
+  UDP thr=0.5000  TCP thr=0.5000  (min recall=-1.0000)
+
+=== Gate 5 Evaluation ===
+  CTU-53: recall=0.9848 (CI_lo=0.9787)
+    FPR_UDP=0.68571(CI_hi=0.69901) FPR_TCP=0.31221(CI_hi=0.32890) -> FAIL
+    TP=2135 FP_UDP=3133 FP_TCP=951 FN=33
+  CTU-54: recall=0.9904 (CI_lo=0.9894)
+    FPR_UDP=0.32029(CI_hi=0.32673) FPR_TCP=0.09271(CI_hi=0.09818) -> FAIL
+    TP=39620 FP_UDP=6534 FP_TCP=1055 FN=383
+
+============================================================
+Gate 5: FAIL
+Checkpoint -> F:\New\integrityguard\outputs\network-eval\ctu13-v9-gate5-candidate.pt

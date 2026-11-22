@@ -12,21 +12,27 @@ import sys
 import time
 import traceback
 import uuid
+from datetime import datetime, timezone
+from collections import deque
 from pathlib import Path
 
-from PySide6.QtCore import QDate, QSettings, Qt, QThread, QTimer, Signal
+from PySide6.QtCore import QDate, QMetaObject, QSettings, Qt, QThread, QTimer, Signal, Slot
 from PySide6.QtGui import QAction, QColor, QFont, QIcon, QPalette
 from PySide6.QtWidgets import (QApplication, QButtonGroup, QCheckBox, QComboBox, QDoubleSpinBox, QFileDialog, QFrame,
                                QGridLayout, QHBoxLayout, QHeaderView, QInputDialog, QLabel, QLineEdit, QMainWindow, QMenu, QMessageBox,
                                QDateEdit, QPlainTextEdit, QProgressBar, QPushButton, QScrollArea, QSpinBox, QStackedWidget,
                                QSystemTrayIcon, QTableWidget, QTableWidgetItem, QVBoxLayout, QWidget)
 
-from .charts import ACCENT, SECOND, GroupBars, HBars, Heatmap, LiveLine, ScoreDots, VerdictBars
+from .charts import ACCENT, SECOND, BenignUDPHistogram, GroupBars, HBars, Heatmap, LiveLine, NNScoreStream, ScoreDots, TrainingHistoryChart, VerdictBars
 from . import online_learn
 from . import recall as R
-from .copilot import answer_with_ollama, list_ollama_models
-from .network_ai import NetworkTelemetry, assess_network_with_ollama, telemetry_digest
+from .network_telemetry import NetworkTelemetry
+from .network_classifier import assess_network_with_classifier
 from .paths import APP_ROOT as ROOT, DATA_ROOT as DATA, RESOURCE_ROOT
+
+# Сетевая flow-модель использует опубликованные метки реальных захватов.
+# Локальные прогнозы и неизвестные потоки не превращаются в обучающие метки.
+NETWORK_CLASSIFIER_CHECKPOINT = DATA / "models" / "candidates" / "network_classifier_candidate.pt"
 from .spec import CLASS_LEVEL, CLASS_RU, CLASSES, LEVEL_RU, LEVELS
 
 VERDICT = {"ALLOW": ("ДОПУСК", "#1f9d63"), "REVIEW": ("НА ПРОВЕРКУ", "#d99a1c"), "BLOCK": ("БЛОКИРОВКА", "#e5484d")}
@@ -257,14 +263,22 @@ class MainWindow(QMainWindow):
         if icon.exists():
             self.setWindowIcon(QIcon(str(icon)))
         self.settings = QSettings(str(DATA / "settings.ini"), QSettings.IniFormat)
+        self.settings.remove("copilot_model")
+        self.settings.remove("network_autoblock_enabled")
         self._guard = None
         self._workers: list[Worker] = []
         self._last_ev: dict | None = None
+        self._monitor_latest_identity = None
         self._candidate_busy = False
-        self._copilot_worker: Worker | None = None
         self._network_telemetry = NetworkTelemetry()
-        self._network_ai_busy = False
-        self._network_ai_next = time.monotonic() + 10
+        self._network_capture_busy = False
+        self._network_flow_busy = False
+        self._network_flow_telemetry = NetworkTelemetry()
+        self._network_capture_next = time.monotonic() + 10
+        self._packet_capture_busy = False
+        self._packet_capture_next = time.monotonic() + 15
+        self._nn_monitor_flows = deque(maxlen=200)
+        self._nn_monitor_status = "Ожидание первого захвата Pktmon."
 
         central = QWidget()
         root = QHBoxLayout(central)
@@ -300,11 +314,12 @@ class MainWindow(QMainWindow):
                  ("Эталоны и версии", self._page_baselines()),
                  ("Журнал событий", self._page_events()), ("Полнота обнаружения", self._page_recall()),
                  ("Обучение и оценка", self._page_train()),
-                 ("Настройки", self._page_settings()), ("ИИ-помощник", self._page_copilot())]
+                 ("Настройки", self._page_settings()),
+                 ("Нейросеть сети", self._page_nn())]
         for i, (name, page) in enumerate(pages):
             if i in (0, 2, 4, 6, 7):
                 section_names = {0: "РАБОЧЕЕ МЕСТО", 2: "УПРАВЛЕНИЕ", 4: "КАЧЕСТВО МОДЕЛИ",
-                                 6: "СИСТЕМА", 7: "ПОМОЩНИК"}
+                                 6: "СИСТЕМА", 7: "НЕЙРОСЕТЬ"}
                 sl.addWidget(label(section_names[i], "navSection"))
             b = QPushButton(name, objectName="nav", checkable=True)
             b.setCursor(Qt.PointingHandCursor)
@@ -341,7 +356,7 @@ class MainWindow(QMainWindow):
         if self.auto_on():
             QTimer.singleShot(300, self._auto_start)
         else:
-            self.auto_note.setText("Автоматический режим выключен (включается в настройках).")
+            self.e_auto_note.setText("Автоматический режим выключен (включается в настройках).")
         self._quitting = False
         self._setup_tray()
         # --- автоочистка устаревших обработанных пакетов во входящих (allow/review/block)
@@ -450,7 +465,7 @@ class MainWindow(QMainWindow):
         return [b.text() for b in self.nav.buttons()].index(name)
 
     def _auto_status(self, last=""):
-        self.auto_note.setText(f"Автоматический режим включён. Папка входящих пакетов: {self.incoming}"
+        self.e_auto_note.setText(f"Автоматический режим включён. Папка входящих пакетов: {self.incoming}"
                                + (f"\n{last}" if last else ""))
 
     def _auto_tick(self):
@@ -480,14 +495,30 @@ class MainWindow(QMainWindow):
                 continue                                  # ещё копируется, не пакет или уже обработан
             self._auto_busy = True
             self._done[str(d)] = sig
-            w = self.run_bg(lambda _, d=d: self._auto_process(d), self._auto_done, silent=True)
+
+            # показываем прогресс-карточку мониторинга
+            pkg_name = d.stem if d.is_file() else d.name
+            self._mon_log_lines = []
+            if hasattr(self, "_mon_progress_card"):
+                self._mon_progress_bar.setValue(5)
+                self._mon_progress_pkg.setText(f"⏳ {pkg_name}")
+                self._mon_progress_log.setText("⏳ Инициализация…")
+                self._mon_progress_card.setVisible(True)
+
+            def _on_progress(step, text, _d=d):
+                self._mon_log_lines.append(text)
+                QMetaObject.invokeMethod(self, "_update_mon_log", Qt.QueuedConnection)
+
+            w = self.run_bg(lambda _, d=d, cb=_on_progress: self._auto_process(d, progress_cb=cb),
+                            self._auto_done, silent=True)
             w.fail.connect(lambda _, path=str(d): self._done.pop(path, None))
             w.finished.connect(lambda: setattr(self, "_auto_busy", False))
             return
 
-    def _auto_process(self, d: Path) -> dict:
+    def _auto_process(self, d: Path, progress_cb=None) -> dict:
         from .intake import process_incoming
-        return process_incoming(d, self.processed, self._analyze_incoming, self._publish_incoming)
+        analyze = (lambda path: self._analyze_incoming(path, progress_cb=progress_cb)) if progress_cb else self._analyze_incoming
+        return process_incoming(d, self.processed, analyze, self._publish_incoming)
 
     def _publish_incoming(self, result):
         if "verdict" in result:
@@ -497,7 +528,7 @@ class MainWindow(QMainWindow):
             else:
                 self.guard().respond(result)
 
-    def _analyze_incoming(self, d: Path):
+    def _analyze_incoming(self, d: Path, progress_cb=None):
         """Проверить входящий пакет против доверенного эталона или осторожно оценить без него."""
         if d.is_file() and d.suffix.lower() == ".whl":
             from .wheel_scan import assess_wheel
@@ -511,7 +542,7 @@ class MainWindow(QMainWindow):
                 res = g.assess_unbaselined(d, "deploy")
                 dest = res["verdict"].lower()
             else:
-                res = g.check(d, "deploy", self._index_for(d))
+                res = g.check(d, "deploy", self._index_for(d), progress_cb=progress_cb)
                 res = self._apply_policy(res)
                 dest = res["verdict"].lower()
         except (ValueError, OSError) as e:
@@ -570,6 +601,23 @@ class MainWindow(QMainWindow):
 
         self.run_bg(job, done, silent=True)
 
+    @Slot()
+    def _update_mon_log(self):
+        """Обновить прогресс-карточку мониторинга из фонового потока (через QueuedConnection)."""
+        lines = getattr(self, "_mon_log_lines", [])
+        total_steps = 6
+        step = len(lines)
+        pct = min(10 + int(step / total_steps * 85), 95)
+        if hasattr(self, "_mon_progress_bar"):
+            self._mon_progress_bar.setValue(pct)
+        icons = {1: "📦", 2: "🔍", 3: "📋", 4: "🔬", 5: "⚖️", 6: "🧠"}
+        log_html = "<br>".join(
+            f"<span style='color:#8a8f99'>{icons.get(i + 1, '•')}</span> {ln}"
+            for i, ln in enumerate(lines)
+        )
+        if hasattr(self, "_mon_progress_log"):
+            self._mon_progress_log.setText(log_html or "⏳ Инициализация…")
+
     def _auto_done(self, res: dict):
         if res.get("incoming_path") and not res.get("moved_to"):
             path = res["incoming_path"]
@@ -598,6 +646,13 @@ class MainWindow(QMainWindow):
                      f"Задание сохранено; повтор через {res['retry_after']} с.")
         self._auto_status(last)
         self._refresh_status()
+        # завершаем прогресс-карточку мониторинга
+        if hasattr(self, "_mon_progress_bar"):
+            self._mon_progress_bar.setValue(100)
+            QTimer.singleShot(3000, lambda: (
+                self._mon_progress_card.setVisible(False)
+                if hasattr(self, "_mon_progress_card") else None
+            ))
         self._refresh_views()
 
     def _retry_incoming(self, path):
@@ -675,26 +730,11 @@ class MainWindow(QMainWindow):
             self._load_events()
         elif name == "Полнота обнаружения":
             self._load_recall()
-        elif name == "ИИ-помощник":
-            self._copilot_refresh_models()
 
     def closeEvent(self, e):
-        if getattr(self, "tray", None) and self.tray.isVisible() and not self._quitting:
-            # окно скрывается в трей, фоновая проверка входящих пакетов не прерывается
-            e.ignore()
-            self.hide()
-            if not self.settings.value("tray_hint_shown", False, type=bool):
-                self.tray.showMessage(
-                    "IntegrityGuard",
-                    "Программа продолжает работать в фоне — значок в трее. "
-                    "Проверка входящих пакетов не прерывается. Выход — через меню значка.",
-                    QSystemTrayIcon.Information, 6000)
-                self.settings.setValue("tray_hint_shown", True)
-                self.settings.sync()
-            return
+        # Закрытие окна крестиком и команда «Выход» в трее завершают приложение.
+        # Не оставляем скрытый фоновый процесс после того, как пользователь закрыл окно.
         busy = [w for w in self._workers if w.isRunning()]
-        if self._copilot_worker is not None and self._copilot_worker.isRunning():
-            busy.append(self._copilot_worker)
         if busy:
             box = QMessageBox(QMessageBox.Question, "IntegrityGuard", "Идёт фоновая задача (проверка или обучение). "
                               "Прервать её и закрыть программу?", QMessageBox.Yes | QMessageBox.No, self)
@@ -733,6 +773,27 @@ class MainWindow(QMainWindow):
         self.mon_state = label("", muted=True, wrap=True)
         self.mon_state.setTextInteractionFlags(Qt.TextSelectableByMouse)
         p.lay.addWidget(card(self.mon_state))
+        self.mon_refresh = label("Обновление данных мониторинга ожидается…", muted=True)
+        p.lay.addWidget(self.mon_refresh)
+
+        # --- прогресс автоматической проверки входящего пакета ---
+        self._mon_progress_bar = QProgressBar()
+        self._mon_progress_bar.setRange(0, 100)
+        self._mon_progress_bar.setValue(0)
+        self._mon_progress_bar.setTextVisible(False)
+        self._mon_progress_bar.setFixedHeight(6)
+        self._mon_progress_bar.setStyleSheet(
+            "QProgressBar { background: #1e2229; border-radius: 3px; }"
+            "QProgressBar::chunk { background: #2bb7ab; border-radius: 3px; }")
+        self._mon_progress_pkg = label("", wrap=False)
+        self._mon_progress_pkg.setStyleSheet("font-weight: 600;")
+        self._mon_progress_log = label("", wrap=True, muted=True)
+        self._mon_progress_log.setTextFormat(Qt.RichText)
+        self._mon_progress_card = card(self._mon_progress_bar, self._mon_progress_pkg,
+                                       self._mon_progress_log, title="Проверка входящего пакета")
+        self._mon_progress_card.setVisible(False)
+        p.lay.addWidget(self._mon_progress_card)
+
         tiles = QGridLayout()
         tiles.setHorizontalSpacing(12)
         tiles.setVerticalSpacing(12)
@@ -781,15 +842,41 @@ class MainWindow(QMainWindow):
 
         self.ch_net = LiveLine("пак./с")
         self.ch_net.empty_text = "Идёт сбор данных о сети…"
+        self.ch_net_out = LiveLine("пак./с")
+        self.ch_net_out.empty_text = "Идёт сбор данных о сети…"
+        net_pkt_row = QHBoxLayout()
+        net_pkt_row.addWidget(card(self.ch_net, title="Входящие пакеты"), 1)
+        net_pkt_row.addWidget(card(self.ch_net_out, title="Исходящие пакеты"), 1)
+        p.lay.addLayout(net_pkt_row)
+        self.ch_net_kb_in = LiveLine("КБ/с")
+        self.ch_net_kb_in.empty_text = "Идёт сбор данных о сети…"
+        self.ch_net_kb_out = LiveLine("КБ/с")
+        self.ch_net_kb_out.empty_text = "Идёт сбор данных о сети…"
+        net_kb_row = QHBoxLayout()
+        net_kb_row.addWidget(card(self.ch_net_kb_in, title="Входящий трафик"), 1)
+        net_kb_row.addWidget(card(self.ch_net_kb_out, title="Исходящий трафик"), 1)
+        p.lay.addLayout(net_kb_row)
         self.net_note = label("", muted=True)
-        self.net_card = card(self.ch_net, self.net_note, title="Входящие сетевые пакеты")
+        self.net_card = card(self.net_note, title="Сетевая активность")
         p.lay.addWidget(self.net_card)
-        self.net_ai_note = label(
-            "Локальная ИИ-оценка запустится автоматически по текущим сетевым метаданным и состоянию IntegrityGuard. "
-            "Оценка рекомендательная: пакетный payload не собирается, правила firewall модель не меняет.",
+        self.net_capture_note = label(
+            "Сетевые счётчики и метаданные соединений собираются автоматически, пока открыта программа. "
+            "Полезная нагрузка пакетов не захватывается; сохранение снимка не блокирует трафик.",
             muted=True, wrap=True)
-        self.net_ai_note.setTextInteractionFlags(Qt.TextSelectableByMouse)
-        p.lay.addWidget(card(self.net_ai_note, title="ИИ-оценка сетевого трафика и функций программы"))
+        self.net_capture_note.setTextInteractionFlags(Qt.TextSelectableByMouse)
+        p.lay.addWidget(card(self.net_capture_note, title="Сбор сетевых наблюдений"))
+        self.net_flow_note = label(
+            "Собственная модель анализирует текущие сокеты во время работы приложения. "
+            "Проверка обновляется примерно раз в секунду. Модель формирует рекомендацию, не меняя Firewall.",
+            muted=True, wrap=True)
+        p.lay.addWidget(card(self.net_flow_note, title="Непрерывный мониторинг сокетов собственной моделью"))
+        self.packet_flow_note = label(
+            "Захват заголовков Pktmon не выполнялся. При повышенных правах программа собирает "
+            "короткие сегменты раз в минуту; исходный захват удаляется после расчёта агрегатов. "
+            "Экспериментальная модель не блокирует трафик.", muted=True, wrap=True)
+        p.lay.addWidget(card(self.packet_flow_note,
+                             title="Мониторинг потоков по заголовкам пакетов (экспериментальный сенсор)"))
+
         self.firewall_ip = QLineEdit()
         self.firewall_ip.setPlaceholderText("Удалённый IPv4 или IPv6")
         self.firewall_status = label("Действие подтверждает оператор.", wrap=True)
@@ -826,6 +913,17 @@ class MainWindow(QMainWindow):
 
     def _load_monitor(self):
         evs = self._read_events()
+        latest_identity = ((evs[-1].get("time"), evs[-1].get("package"), evs[-1].get("version"))
+                           if evs else None)
+        if latest_identity != self._monitor_latest_identity:
+            previous_latest = self._monitor_latest_identity
+            self._monitor_latest_identity = latest_identity
+            follows_latest = (self._last_ev is None or
+                              (previous_latest is not None and
+                               (self._last_ev.get("time"), self._last_ev.get("package"),
+                                self._last_ev.get("version")) == previous_latest))
+            if evs and follows_latest:
+                self._show_event(evs[-1], external_refresh=True)
         self.tiles["total"].setText(str(len(evs)))
         for key in ("ALLOW", "REVIEW", "BLOCK"):
             self.tiles[key].setText(str(sum(e["verdict"] == key for e in evs)))
@@ -846,10 +944,37 @@ class MainWindow(QMainWindow):
                     color, 4, tips={5: threat_tip})
         self.mon_table.setSortingEnabled(True)             # удобно сортировать по столбцу кликом на заголовок
         mode = (f"Автоматический режим включён: пакеты из папки {getattr(self, 'incoming', '')} проверяются сами."
-                if self.auto_on() else "Автоматический режим выключен: проверки запускаются вручную.")
+                if self.auto_on() else "Автоматический режим выключен: проверки запускаются вручную, "
+                                      "счётчики изменятся после следующей проверки.")
         last = f" Последняя проверка: {_when(evs[-1]['time'])}." if evs else " Проверок ещё не было."
-        self.mon_state.setText(mode + last)
+        self.mon_state.setText(mode + last + f" Обновление панели: {time.strftime('%H:%M:%S')}.")
         self._load_audit()
+
+    def _monitor_signature(self):
+        registry = Path(self.cfg("registry")) / "events.jsonl"
+        try:
+            stat = registry.stat()
+            event_signature = (stat.st_mtime_ns, stat.st_size)
+        except OSError:
+            event_signature = (None, None)
+
+        incoming = getattr(self, "incoming", DATA / "incoming")
+        queue_signature = []
+        try:
+            for entry in sorted(incoming.iterdir(), key=lambda item: item.name.lower()):
+                try:
+                    item_stat = entry.stat()
+                    item_signature = [entry.name, entry.is_dir(), item_stat.st_mtime_ns, item_stat.st_size]
+                    if entry.is_dir():
+                        manifest = entry / "manifest.json"
+                        manifest_stat = manifest.stat()
+                        item_signature.extend((manifest_stat.st_mtime_ns, manifest_stat.st_size))
+                    queue_signature.append(tuple(item_signature))
+                except OSError:
+                    queue_signature.append((entry.name, "unavailable"))
+        except OSError:
+            pass
+        return event_signature, tuple(queue_signature)
 
     def _load_audit(self):
         """Карантинные пакеты, случайно отобранные на аудит человеком (см. online_learn.AUDIT_RATE),
@@ -945,18 +1070,20 @@ class MainWindow(QMainWindow):
                     self._label_registry_signature = signature
             except OSError:
                 pass
-        f = Path(self.cfg("registry")) / "events.jsonl"
         try:
-            sig = (f.stat().st_mtime if f.exists() else 0, self._queue())
-        except OSError:
+            sig = self._monitor_signature()
+        except (OSError, AttributeError):
             sig = None
         if sig != self._mon_sig:                          # журнал или очередь изменились — перерисовать
             self._mon_sig = sig
             self._load_monitor()
             self._load_events(keep_selection=True)        # «Журнал событий» тоже обновляется сам, без кнопки
+        if hasattr(self, "mon_refresh"):
+            self.mon_refresh.setText(f"Данные мониторинга проверены {time.strftime('%H:%M:%S')}.")
+        self._maybe_capture_packet_segment()
         if self._psutil is None:
-            if hasattr(self, "net_ai_note"):
-                self.net_ai_note.setText("Сетевой сенсор psutil недоступен; модель не получает телеметрию и не выносит рекомендацию.")
+            if hasattr(self, "net_capture_note"):
+                self.net_capture_note.setText("Сетевой сенсор psutil недоступен; живые снимки не сохраняются.")
             return
         try:
             io, now = self._psutil.net_io_counters(), time.monotonic()
@@ -966,108 +1093,245 @@ class MainWindow(QMainWindow):
             self.ch_net.update()
             return
         if self._net_prev:
-            p0, b0, t0 = self._net_prev
+            p0, b0, ps0, bs0, t0 = self._net_prev
             dt = max(now - t0, 1e-3)
-            rate = max(io.packets_recv - p0, 0) / dt
-            self.ch_net.push(rate)
-            self.net_note.setText(f"Сейчас: {rate:.0f} пак./с, {max(io.bytes_recv - b0, 0) / dt / 1024:.1f} КБ/с. "
-                                  f"Обновление раз в секунду, окно 2 минуты.")
-        self._net_prev = (io.packets_recv, io.bytes_recv, now)
-        self._maybe_network_ai_assessment(now)
+            rate_in = max(io.packets_recv - p0, 0) / dt
+            rate_out = max(io.packets_sent - ps0, 0) / dt
+            kb_in = max(io.bytes_recv - b0, 0) / dt / 1024
+            kb_out = max(io.bytes_sent - bs0, 0) / dt / 1024
+            self.ch_net.push(rate_in)
+            self.ch_net_out.push(rate_out)
+            self.ch_net_kb_in.push(kb_in)
+            self.ch_net_kb_out.push(kb_out)
+            self.net_note.setText(
+                f"Сейчас: вход {rate_in:.0f} пак./с ({kb_in:.1f} КБ/с), "
+                f"выход {rate_out:.0f} пак./с ({kb_out:.1f} КБ/с). "
+                f"Обновление раз в секунду, окно 2 минуты.")
+        self._net_prev = (io.packets_recv, io.bytes_recv, io.packets_sent, io.bytes_sent, now)
+        self._maybe_live_flow_assessment()
+        self._maybe_capture_network_snapshot(now)
 
-    def _maybe_network_ai_assessment(self, now: float | None = None):
-        if getattr(self, "_network_ai_paused", False) or self._network_ai_busy:
+    def _maybe_capture_packet_segment(self):
+        """Collect a short, payload-free Pktmon segment without blocking the GUI."""
+        if self._packet_capture_busy:
             return
-        now = time.monotonic() if now is None else now
-        if now < self._network_ai_next:
+        now = time.monotonic()
+        if now < self._packet_capture_next:
             return
-        # A slow local model cannot start overlapping scans. If a scan is still
-        # running, the next one is scheduled only after it completes.
-        self._network_ai_busy = True
-        self._network_ai_next = now + 60
-        model = str(self.settings.value("copilot_model", "qwen3.5:4b")).strip() or "qwen3.5:4b"
-        self.net_ai_note.setText("Ollama анализирует живые счётчики интерфейсов, текущие соединения и состояние функций IntegrityGuard…")
+        # Keep Pktmon segments close to contiguous; a 10 s sample once per
+        # minute observed only ~17% of traffic and missed most short flows.
+        self._packet_capture_next = now + 30
+        self._packet_capture_busy = True
 
         def work(_progress):
-            from .copilot_audit import CopilotAudit
-            from .copilot_tools import execute_tool
-
-            context = self._copilot_tool_context()
-            audit = CopilotAudit(DATA / "copilot_audit.sqlite")
-            snapshot = app_state = None
+            runtime_path = DATA / "online" / "network_runtime_metrics.sqlite"
+            from .network_runtime_evidence import record_packet_capture_segment, record_captured_flows
+            from .pktmon_capture import capture_header_segment
             try:
-                context["network_snapshot"] = self._network_telemetry.sample(self._psutil)
-                snapshot = execute_tool("network_status", {}, context)
-                app_state = execute_tool("monitoring_status", {}, context)
-                assessment = assess_network_with_ollama(snapshot, app_state, model)
-                digest = telemetry_digest(snapshot, app_state, assessment)
-                assessment_json = json.dumps(assessment, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
-                audit.append(
-                    principal=getpass.getuser(),
-                    question="periodic_network_assessment",
-                    answer=assessment_json,
-                    model=assessment["model"],
-                    status="insufficient_evidence" if assessment["insufficient_evidence"] else "answered",
-                    source_hashes=[digest],
-                    tool_calls=[{"name": "network_ai_assessment", "status": assessment["decision"],
-                                 "result_sha256": hashlib.sha256(assessment_json.encode("utf-8")).hexdigest()}],
+                capture = capture_header_segment(duration_seconds=30)
+            except Exception as error:  # noqa: BLE001 — persist the sensor failure for diagnosis
+                capture = {"status": "capture_exception",
+                           "reason": f"{type(error).__name__}: {error}"[:400]}
+            segment_hash = None
+            try:
+                segment_hash = record_packet_capture_segment(
+                    runtime_path,
+                    observed_at_utc=time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+                    capture=capture,
                 )
-                return snapshot, app_state, assessment
-            except Exception as error:
-                hashes = [telemetry_digest(snapshot, app_state, None)] if snapshot is not None and app_state is not None else []
-                audit.append(
-                    principal=getpass.getuser(), question="periodic_network_assessment",
-                    answer=f"{type(error).__name__}: local network assessment failed",
-                    model=model, status="error", source_hashes=hashes,
-                    tool_calls=[{"name": "network_ai_assessment", "status": "error",
-                                 "result_sha256": hashlib.sha256(type(error).__name__.encode("utf-8")).hexdigest()}],
-                )
-                raise
+                if segment_hash and capture.get("flows"):
+                    capture["evidence_journal"] = record_captured_flows(
+                        runtime_path, segment_hash=segment_hash,
+                        observed_at_utc=time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+                        flows=capture.get("flows", []),
+                    )
+            except (OSError, ValueError, TypeError):
+                capture["evidence_journal"] = {"stored_flow_count": 0, "status": "write_failed"}
+            assessment = None
+            if capture.get("status") in ("ok", "parsed_best_effort"):
+                from .network_flow_model import assess_completed_packet_flows
+                candidate_path = (Path(__file__).resolve().parents[1] / "models"
+                                  / "network_flow_v3_candidate.pt")
+                assessment = assess_completed_packet_flows(capture.get("flows", []), candidate_path)
+            if assessment and assessment.get("status") == "recommendation_candidate":
+                try:
+                    from .network_runtime_evidence import record_flow_inference, runtime_summary
+                    runtime_path = DATA / "online" / "network_runtime_metrics.sqlite"
+                    record_flow_inference(
+                        runtime_path,
+                        observed_at_utc=time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+                        inference_ms=assessment["inference_latency_ms"],
+                        flows_scored=assessment["scored_flows"],
+                        capture_status=capture.get("status", "unknown"),
+                        packets_seen=(capture.get("counts") or {}).get("packets"),
+                        drop_counters_available=bool(capture.get("drop_counters_available")),
+                        candidate_sha256=assessment["checkpoint_sha256"],
+                        feature_version=assessment["feature_version"],
+                        dataset_manifest_sha256=assessment["dataset_manifest_sha256"],
+                        threshold=assessment["threshold"],
+                        capture_segment_hash=segment_hash,
+                    )
+                    assessment["runtime_summary"] = runtime_summary(runtime_path)
+                except (OSError, ValueError, KeyError, TypeError):
+                    assessment["runtime_summary"] = {"sample_count": 0}
+            return capture, assessment
 
         def done(result):
-            snapshot, app_state, assessment = result
-            labels = {"ALLOW": "ЯВНАЯ АТАКА НЕ УСТАНОВЛЕНА", "REVIEW": "НУЖНА ПРОВЕРКА",
-                      "BLOCK": "РЕКОМЕНДАЦИЯ: БЛОКИРОВАТЬ"}
-            note = (f"{labels[assessment['decision']]} · модель {assessment['model']} · "
-                    f"соединений: {snapshot['active_connection_count']}, удалённых endpoint: "
-                    f"{snapshot['remote_endpoint_count']} · {snapshot['observed_at_utc']}\n"
-                    f"{assessment['summary']}\n"
-                    "Эта оценка Ollama не применяет правила Windows Firewall. "
-                    "Сенсор видит счётчики и метаданные соединений, не payload пакетов.")
-            if assessment["model_decision"] != assessment["decision"]:
-                note += f"\nИсходная оценка Ollama: {assessment['model_decision']}."
-            if assessment["evidence_ids"]:
-                note += "\nОснования оценки (ID): " + ", ".join(assessment["evidence_ids"])
-            intel = snapshot.get("threat_intelligence", {})
-            if isinstance(intel, dict):
-                match_count = len(intel.get("matches", []))
-                note += (f"\nПубличный источник {intel.get('source', 'DShield')}: "
-                         f"{match_count} совпадений, статус {intel.get('status', 'unknown')}; "
-                         f"снимок {intel.get('checked_at_utc') or 'не получен'}. "
-                         "Совпадение даёт контекст и само по себе не доказывает атаку.")
-            if not snapshot["connection_table_query_succeeded"] or not snapshot["interface_counters_available"]:
-                note += " Системный запрос телеметрии неполон или недоступен."
-            self.net_ai_note.setText(note)
-            self._network_ai_busy = False
-            self._network_ai_next = time.monotonic() + 60
+            capture, assessment = result
+            status = capture.get("status")
+            observed = time.strftime("%H:%M:%S")
+            if status in ("ok", "parsed_best_effort") and assessment \
+                    and assessment.get("status") == "recommendation_candidate":
+                scored = assessment.get("flow_scores") or []
+                self._nn_monitor_flows.extend(scored)
+                self._nn_monitor_status = (
+                    f"Последний Pktmon-сегмент {observed}: оценено {len(scored)} полных потоков; "
+                    f"в видимом окне {len(self._nn_monitor_flows)}. Положительная оценка — кандидат для обзора, "
+                    "локальные метки неизвестны.")
+            elif status in ("ok", "parsed_best_effort"):
+                self._nn_monitor_status = (
+                    f"Последний Pktmon-сегмент {observed} сохранён, но оценка потока недоступна: "
+                    f"{(assessment or {}).get('reason', (assessment or {}).get('status', 'unknown'))}.")
+            else:
+                reason = str(capture.get("reason", status or "неизвестная ошибка"))
+                self._nn_monitor_status = f"Pktmon недоступен ({observed}): {reason}"
+            if hasattr(self, "nn_monitor_status_label"):
+                self.nn_monitor_status_label.setText(self._nn_monitor_status)
+            if hasattr(self, "nn_score_stream"):
+                self._refresh_nn_monitor()
+            if status in ("ok", "parsed_best_effort"):
+                counts = capture.get("counts", {})
+                journal = capture.get("evidence_journal") or {}
+                text = (f"Pktmon · разобрано IP-пакетов {counts.get('parsed', 0)} из "
+                        f"{counts.get('packets', 0)}, не-IP кадров {counts.get('non_ip_frames', 0)}, "
+                        f"неразобранных/обрезанных {counts.get('unsupported_or_truncated', 0)}. "
+                        f"Полных потоков: {capture.get('complete_flow_count', 0)}; "
+                        f"в локальном журнале потоков: {journal.get('stored_flow_count', 0)} "
+                        f"(метки неизвестны). ")
+                if assessment and assessment.get("status") == "recommendation_candidate":
+                    text += (f"Flow-модель на {assessment.get('dataset_family', 'публичных метках')} "
+                             f"оценила {assessment['scored_flows']} полных потоков; "
+                             f"выше порога {assessment['threshold']:.4f}: "
+                             f"{assessment['attack_candidates_at_threshold']}; inference "
+                             f"{assessment['inference_latency_ms']:.2f} мс. "
+                             "Используются опубликованные авторами набора метки. "
+                             "Целевая сеть не оценена, Firewall не меняется.")
+                else:
+                    text += "Оценка модели пропущена: нет совместимого кандидата или полных потоков."
+                if status == "parsed_best_effort":
+                    text += " Захват неполный; результаты только диагностические."
+                self.packet_flow_note.setText(text)
+            else:
+                self.packet_flow_note.setText(
+                    f"Захват пакетов недоступен · {capture.get('reason', status)}. "
+                    "Сокетный мониторинг и системные счётчики продолжают работать.")
+            self._packet_capture_busy = False
 
         def failed(message):
-            self.net_ai_note.setText(
-                f"ИИ-оценка сейчас недоступна: {message}. Сбор счётчиков продолжает работать; рекомендация не вынесена.")
-            self._network_ai_busy = False
-            self._network_ai_next = time.monotonic() + 300
+            self.packet_flow_note.setText(f"Захват заголовков не выполнен: {message}")
+            self._packet_capture_busy = False
 
         worker = Worker(work, self)
         worker.done.connect(done)
         worker.fail.connect(failed)
-
-        def finish():
-            self._network_ai_busy = False
-            if worker in self._workers:
-                self._workers.remove(worker)
-
-        worker.finished.connect(finish)
+        worker.finished.connect(lambda: setattr(self, "_packet_capture_busy", False))
         self._workers.append(worker)
+        worker.finished.connect(lambda: self._workers.remove(worker) if worker in self._workers else None)
+        worker.start()
+
+    def _maybe_live_flow_assessment(self):
+        if self._psutil is None or self._network_flow_busy:
+            return
+        self._network_flow_busy = True
+
+        def work(_progress):
+            snapshot = self._network_flow_telemetry.sample(self._psutil)
+            from .network_flow_model import assess
+            return snapshot, assess(snapshot)
+
+        def done(result):
+            snapshot, assessment = result
+            if assessment.get("status") == "recommendation":
+                self.net_flow_note.setText(
+                    f"Живой опрос · {snapshot['observed_at_utc']} · "
+                    f"активных соединений {snapshot['active_connection_count']}, "
+                    f"удалённых узлов {snapshot['remote_endpoint_count']}. "
+                    f"Модель обработала {assessment['scored_connections']} сокетов, "
+                    f"кандидатов {assessment['attack_candidates']}, "
+                    f"средняя оценка атаки {assessment['mean_attack_probability']:.1%}. "
+                    "Опрос выполняется раз в секунду, пока программа открыта. "
+                    "Это рекомендация; правила Firewall не меняются.")
+            else:
+                reason = assessment.get("reason", assessment.get("status"))
+                if assessment.get("status") == "unavailable":
+                    self.net_flow_note.setText(
+                        f"Живой опрос сокетов · {snapshot['observed_at_utc']} · "
+                        f"сокетная модель не загружена: {reason}. Это не оценка потоков пакетов: "
+                        "per-flow кандидат проверяется отдельно только на полных потоках Pktmon.")
+                else:
+                    self.net_flow_note.setText(
+                        f"Живой опрос · {snapshot['observed_at_utc']} · "
+                        f"модель не вынесла оценку: {reason}")
+            self._network_flow_busy = False
+
+        def failed(message):
+            self.net_flow_note.setText(f"Живой опрос сокетов не выполнен: {message}")
+            self._network_flow_busy = False
+
+        worker = Worker(work, self)
+        worker.done.connect(done)
+        worker.fail.connect(failed)
+        worker.finished.connect(lambda: setattr(self, "_network_flow_busy", False))
+        self._workers.append(worker)
+        worker.finished.connect(lambda: self._workers.remove(worker) if worker in self._workers else None)
+        worker.start()
+
+    def _maybe_capture_network_snapshot(self, now: float | None = None):
+        if self._network_capture_busy or self._psutil is None:
+            return
+        now = time.monotonic() if now is None else now
+        if now < self._network_capture_next:
+            return
+        self._network_capture_busy = True
+        self._network_capture_next = now + 20
+
+        def work(_progress):
+            snapshot = self._network_telemetry.sample(self._psutil)
+            from .network_evidence import NetworkEventLog
+            event_log = NetworkEventLog(DATA / "online" / "network_events.sqlite")
+            event_id = event_log.capture(snapshot, source="gui_periodic")
+            try:
+                classifier = assess_network_with_classifier(
+                    snapshot, {}, NETWORK_CLASSIFIER_CHECKPOINT)
+            except Exception as error:  # noqa: BLE001 — model scoring cannot stop capture
+                classifier = {"status": "error", "reason": type(error).__name__}
+            return snapshot, event_id, classifier
+
+        def done(result):
+            snapshot, event_id, classifier = result
+            note = (f"Снимок сохранён · {snapshot['observed_at_utc']} · "
+                    f"активных соединений: {snapshot.get('active_connection_count', 0)} · "
+                    f"удалённых узлов: {snapshot.get('remote_endpoint_count', 0)} · id {event_id}. ")
+            if classifier.get("status") == "error":
+                note += "Собственный классификатор недоступен; сетевые данные сохранены для разметки."
+            else:
+                note += (f"Собственная модель: {classifier.get('decision', 'REVIEW')}. "
+                         f"{classifier.get('summary', 'Недостаточно данных для вывода.')} "
+                         "Это рекомендация модели; Firewall не меняется.")
+            self.net_capture_note.setText(note)
+            self._network_capture_busy = False
+            self._check_nn()
+
+        def failed(message):
+            self.net_capture_note.setText(f"Снимок сети не сохранён: {message}")
+            self._network_capture_busy = False
+
+        worker = Worker(work, self)
+        worker.done.connect(done)
+        worker.fail.connect(failed)
+        worker.finished.connect(lambda: setattr(self, "_network_capture_busy", False))
+        self._workers.append(worker)
+        worker.finished.connect(lambda: self._workers.remove(worker) if worker in self._workers else None)
         worker.start()
 
     def _change_network_block(self, action):
@@ -1094,8 +1358,8 @@ class MainWindow(QMainWindow):
         self.firewall_status.setText("Изменяю правила Windows Firewall…")
 
         def work(_progress):
-            from .copilot_audit import CopilotAudit
-            audit = CopilotAudit(DATA / "copilot_audit.sqlite")
+            from .security_audit import SecurityAudit
+            audit = SecurityAudit(DATA / "security_audit.sqlite")
             request = f"{action} {address} {uuid.uuid4()}"
             principal = getpass.getuser()
             audit.append(principal=principal, question=request, answer="requested", model="operator",
@@ -1125,14 +1389,6 @@ class MainWindow(QMainWindow):
         worker.fail.connect(self.firewall_status.setText)
         worker.finished.connect(lambda: [button.setEnabled(True) for button in self.firewall_buttons])
 
-    def _copilot_tool_context(self) -> dict:
-        from .copilot_tools import COPILOT_READ_CAPABILITIES
-        return {"principal": getpass.getuser(), "data_root": DATA, "incoming": self.incoming,
-                "processed": self.processed, "registry": Path(self.cfg("registry")),
-                "detector": Path(self.cfg("model")), "auto_enabled": self.auto_on(),
-                "network_intel_enabled": True,
-                "capabilities": sorted(COPILOT_READ_CAPABILITIES)}
-
     def run_bg(self, fn, done, button=None, progress=None, silent=False):
         w = Worker(fn, self)
         if button:
@@ -1153,62 +1409,35 @@ class MainWindow(QMainWindow):
 
     # ------------------------------------------------------------ страница «Проверка»
     def _page_check(self):
-        p = Page("Проверка пакета", "Кандидат сравнивается с зарегистрированным эталоном на трёх уровнях целостности: "
-                                    "структурном (граф зависимостей), параметрическом (веса) и поведенческом (отклик модели).")
-        self.auto_note = label("", muted=True, wrap=True)
-        self.auto_note.setTextInteractionFlags(Qt.TextSelectableByMouse)
-        open_btn = QPushButton("Открыть папку входящих")
-        open_btn.clicked.connect(self._open_incoming)
-        arow = QHBoxLayout()
-        arow.addWidget(self.auto_note, 1)
-        arow.addWidget(open_btn)
-        p.lay.addWidget(card(arow))
-        # ---- главный блок: ровно 1-2 клика и больше ничего делать не нужно ----
-        self.pkg = PathEdit("Каталог пакета-кандидата (manifest.json, model.pt, src/)")
-        self.pkg.picked.connect(self._check)
-        self.pkg.edit.textChanged.connect(self._sync_watch)
-        self.watch_note = label("", muted=True, wrap=True)
-        hero = QVBoxLayout()
-        hero.addWidget(label("Что проверить?", "h2"))
-        hero.addWidget(label("Укажите каталог своего пакета — проверка начнётся сама, без лишних кнопок.",
-                              muted=True, wrap=True))
-        hero.addWidget(self.pkg)
-        hero.addWidget(self.watch_note)
-        p.lay.addWidget(card(hero))
+        p = Page("Проверка пакета", "Сетевые снимки анализируются автоматически по мере поступления. "
+                                    "Кнопка ниже запускает повторную оценку последнего снимка; модельные предложения не применяют блокировку.")
+        # ---- строка статуса анализа + кнопка повтора ----
+        self._check_status_lbl = label("Загружаем последнее событие из БД\u2026", muted=True, wrap=True)
+        self.check_btn = QPushButton("\u27f3  Повторить оценку", objectName="primary")
+        self.check_btn.setMinimumWidth(180)
+        self.check_btn.clicked.connect(lambda: self._check_nn(force=True))
+        status_row = QHBoxLayout()
+        status_row.addWidget(self._check_status_lbl, 1)
+        status_row.addWidget(self.check_btn)
+        p.lay.addWidget(card(status_row))
 
-        # ---- дополнительные параметры: скрыты по умолчанию, чтобы не пугать при первом запуске ----
-        self.stage = QComboBox()
-        for code, name in (("build", "Сборка"), ("deploy", "Поставка"), ("runtime", "Эксплуатация")):
-            self.stage.addItem(name, code)
-        self.strict = QCheckBox("Строгий режим («на проверку» = блокировка)")
-        self.promote = QCheckBox("При допуске сделать новым эталоном")
-        self.check_btn = QPushButton("Проверить", objectName="primary")
-        self.check_btn.setMinimumWidth(150)
-        self.check_btn.clicked.connect(self._check)
-        g = QGridLayout()
-        g.setHorizontalSpacing(12)
-        g.setVerticalSpacing(10)
-        g.addWidget(label("Стадия", muted=True), 0, 0)
-        g.addWidget(self.stage, 0, 1)
-        g.addWidget(self.strict, 0, 2)
-        g.addWidget(self.promote, 0, 3)
-        g.setColumnStretch(2, 1)
-        row = QHBoxLayout()
-        row.addWidget(self.check_btn)
-        row.addStretch(1)
-        adv_body = QWidget()
-        adv_lay = QVBoxLayout(adv_body)
-        adv_lay.setContentsMargins(0, 8, 0, 0)
-        adv_lay.setSpacing(10)
-        adv_lay.addLayout(g)
-        adv_lay.addLayout(row)
-        adv_body.hide()
-        self._adv_body = adv_body
-        self.adv_toggle = QPushButton("▸  Дополнительные параметры (стадия и политика проверки)",
-                                      objectName="flat")
-        self.adv_toggle.setCursor(Qt.PointingHandCursor)
-        self.adv_toggle.clicked.connect(self._toggle_advanced)
-        p.lay.addWidget(card(self.adv_toggle, adv_body))
+        # --- прогресс-бар и живой лог (скрыты до запуска проверки)
+        self._check_progress_bar = QProgressBar()
+        self._check_progress_bar.setRange(0, 100)
+        self._check_progress_bar.setValue(0)
+        self._check_progress_bar.setTextVisible(False)
+        self._check_progress_bar.setFixedHeight(6)
+        self._check_progress_bar.setStyleSheet(
+            "QProgressBar { background: #1e2229; border-radius: 3px; }"
+            "QProgressBar::chunk { background: #2bb7ab; border-radius: 3px; }")
+        self._check_progress_bar.setVisible(False)
+        self._check_log = label("", wrap=True, muted=True)
+        self._check_log.setTextFormat(Qt.RichText)
+        self._check_log.setVisible(False)
+        # --- карточка прогресса (скрыта пока не запущена проверка)
+        self._check_progress_card = card(self._check_progress_bar, self._check_log, title="Ход анализа")
+        self._check_progress_card.setVisible(False)
+        p.lay.addWidget(self._check_progress_card)
 
         # результат
         self.badge = label("—", wrap=False)
@@ -1273,18 +1502,56 @@ class MainWindow(QMainWindow):
         p.lay.addLayout(two)
         p.lay.addWidget(card(self.actions, title="Рекомендуемые действия реагирования"))
         p.lay.addStretch(1)
-        self._watch_seen = None
-        self._watch_fingerprint = None
-        self._watch_last_fingerprint_at = 0.0
-        self._watch_timer = QTimer(self)
-        self._watch_timer.timeout.connect(self._watch_tick)
-        saved_pkg = self.settings.value("watch_pkg", "")
-        if saved_pkg:
-            self.pkg.setText(saved_pkg)                    # восстановление после перезапуска: наблюдение пойдёт само
-        else:
-            self._sync_watch("")
+        # Автоматически запустить анализ после инициализации страницы
+        self._check_busy = False
+        self._check_last_event_id = None
+        self._check_inflight_event_id = None
+        QTimer.singleShot(300, self._check_nn)
         return p
 
+
+    def _show_event_nn(self, ev):
+        """Displays neural network analysis result on Package Check page."""
+        self._set_badge(ev.get("verdict"))
+        rs = ev.get("risk_score")
+        rs_color = "#8a8f99" if rs is None else "#e5484d" if rs >= 70 else "#d99a1c" if rs >= 30 else "#1f9d63"
+        self.risk_badge.setText("\u2014" if rs is None else str(rs))
+        self.risk_badge.setStyleSheet(
+            f"background: {rs_color}22; color: {rs_color}; border: 2px solid {rs_color}; "
+            f"border-radius: 9px; font-size: 14pt; font-weight: 700; padding: 4px 10px;")
+        verdict = ev.get("verdict", "REVIEW")
+        decision_ru = {"ALLOW": "ДОПУСТИТЬ", "BLOCK": "ЗАБЛОКИРОВАТЬ", "REVIEW": "НА ПРОВЕРКУ"}.get(verdict, verdict)
+        risk_text = f"риск {rs}/100" if rs is not None else "оценка риска не рассчитана"
+        self.res_title.setText(f"Нейросеть: {decision_ru}  ({risk_text})")
+        self.res_sub.setText(ev.get("threat_ru", ""))
+        self.pdf_btn.setEnabled(False)
+        levels = ev.get("levels", {})
+        for name, (bar, val) in self.level_bars.items():
+            v = levels.get(name)
+            bar.setValue(int(round(100 * v)) if v is not None else 0)
+            val.setText(f"{v:.0%}" if v is not None else "\u2014")
+            if v is not None:
+                color = "#1f9d63" if v >= 0.7 else "#d99a1c" if v >= 0.4 else "#e5484d"
+                bar.setStyleSheet(f"QProgressBar::chunk {{ background: {color}; border-radius: 3px; }}")
+        nn_result = ev.get("_nn_result", {})
+        probs = nn_result.get("class_probabilities") or {}
+        if probs:
+            p_allow, p_block = probs.get("ALLOW", 0), probs.get("BLOCK", 0)
+            probabilities_html = (f"<b>Вероятность угрозы:</b> {p_block:.1%} &nbsp;|&nbsp; "
+                                  f"<b>Вероятность безопасности:</b> {p_allow:.1%}<br>")
+        else:
+            probabilities_html = "<b>Вероятности классов:</b> не рассчитаны — нет подходящего обученного кандидата.<br>"
+        actions_html = (probabilities_html +
+                        f"<b>Предложение нейросети:</b> {nn_result.get('decision', '?')}<br>"
+                        f"{nn_result.get('summary', '')}")
+        if verdict == "BLOCK":
+            actions_html += "<br><br>\u26d4 <b>Рекомендуется заблокировать</b> данный сетевой снимок."
+        elif verdict == "ALLOW":
+            actions_html += "<br><br>\u2705 <b>Трафик выглядит безопасным.</b> Дополнительных действий не требуется."
+        else:
+            actions_html += "<br><br>\u26a0\ufe0f <b>Рекомендуется ручная проверка</b> данного события."
+        self.actions.setText(actions_html)
+        self._last_ev = ev
     def _set_badge(self, verdict):
         text, color = VERDICT.get(verdict, ("—", "#2a2f3a"))
         self.badge.setText(text)
@@ -1295,110 +1562,168 @@ class MainWindow(QMainWindow):
         side = Path(f"{pkg}.index.json")       # необязательный доверенный индекс рядом с пакетом
         return str(side) if side.exists() else None
 
-    def _check(self):
-        pkg = self.pkg.text()
-        if not pkg or not (Path(pkg) / "manifest.json").exists():
-            self.notify("Укажите каталог реального пакета с manifest.json, используя кнопку «Обзор…».", "warn")
+    def _check_load_events(self):
+        """Fetches latest event snapshot from DB. Returns (event_id, snap_json) or (None, None)."""
+        import sqlite3
+        import pathlib
+        db_path = DATA / "online" / "network_events.sqlite"
+        if not db_path.exists():
+            return None, None
+        try:
+            con = sqlite3.connect(str(db_path))
+            row = con.execute(
+                "SELECT event_id, snapshot_json FROM events ORDER BY captured_at_utc DESC LIMIT 1"
+            ).fetchone()
+            con.close()
+            if row:
+                return row[0], row[1]
+        except Exception:
+            pass
+        return None, None
+
+    def _check_nn(self, force: bool = False):
+        """Automatically score each newly captured network snapshot; manual refresh is optional."""
+        if self._check_busy:
             return
-        stage, strict, promote = self.stage.currentData(), self.strict.isChecked(), self.promote.isChecked()
+        import json as _json
+        event_id, snap_json = self._check_load_events()
+        if not event_id or not snap_json:
+            self._check_status_lbl.setText("\u26a0\ufe0f Нет событий в БД для анализа.")
+            return
+        if not force and event_id == self._check_last_event_id:
+            return
+        self._check_busy = True
+        self._check_inflight_event_id = event_id
+        self._check_status_lbl.setText(f"\U0001f9e0 Анализируем событие {str(event_id)[:20]}\u2026")
+
+        self._check_log_lines = []
+        self._check_progress_bar.setValue(0)
+        self._check_progress_bar.setVisible(True)
+        self._check_log.setVisible(True)
+        self._check_log.setText("\u23f3 Анализ запущен\u2026")
+        self._check_progress_card.setVisible(True)
+
+        def _log(text):
+            self._check_log_lines.append(text)
+            QMetaObject.invokeMethod(self, "_update_check_log", Qt.QueuedConnection)
 
         def job(_):
-            g = self.guard()
-            from .collect import fingerprint
+            import json as _json2
+            from .network_classifier import assess_network_with_classifier, extract_features
+            from pathlib import Path as _Path
             try:
-                before = fingerprint(pkg)
-                ev = g.check(pkg, stage, self._index_for(pkg), strict)
-                if fingerprint(pkg) != before:
-                    ev = g.assessment_error(pkg, "пакет изменился во время проверки; результат сравнения не сохранён",
-                                            stage)
-            except (ValueError, OSError) as error:
-                ev = g.assessment_error(pkg, error, stage)
-            ev = self._apply_policy(ev)
-            g.respond(ev, pkg, promote)
-            return ev
-        self.run_bg(job, lambda ev: (self._show_event(ev), self._refresh_views()), self.check_btn)
+                snapshot = _json2.loads(snap_json) if isinstance(snap_json, str) else snap_json
+            except Exception:
+                snapshot = {}
+            _log("\U0001f4e6 Извлечение признаков снимка\u2026")
+            features = extract_features(snapshot)
+            _log(f"\U0001f50d Признаков извлечено: {len(features)}")
+            checkpoint_path = NETWORK_CLASSIFIER_CHECKPOINT
+            _log("\U0001f9e0 Запуск нейросети\u2026")
+            result = assess_network_with_classifier(snapshot, {}, checkpoint_path)
+            probs = result.get("class_probabilities", {})
+            p_block = probs.get("BLOCK")
+            decision = result.get("decision", "REVIEW")
+            probability_text = f"p_угрозы={p_block:.1%}" if p_block is not None else "оценка модели отсутствует"
+            _log(f"\u2696\ufe0f Предложение: {decision}  ({probability_text})")
+            # Structural: аномалии структуры сетевых соединений
+            structural_score = 1.0 - min(1.0,
+                features.get("port_scan_suspected_count", 0) * 0.4 +
+                features.get("unattributed_endpoint_share", 0) * 0.4 +
+                min(features.get("new_remote_endpoint_count", 0) / 20.0, 1.0) * 0.2
+            )
+            # Parametric: параметры трафика
+            pz = abs(features.get("packet_rate_zscore", 0.0))
+            bz = abs(features.get("byte_rate_zscore", 0.0))
+            non_https = features.get("non_https_endpoint_share", 0)
+            parametric_score = 1.0 - min(1.0,
+                min(pz / 5.0, 1.0) * 0.3 +
+                min(bz / 5.0, 1.0) * 0.3 +
+                non_https * 0.4
+            )
+            # Behavioral: поведенческие аномалии
+            suspicious = features.get("suspicious_port_match_count", 0)
+            blocked_ratio = features.get("blocked_state_ratio", 0)
+            behavioral_score = 1.0 - min(1.0,
+                min(suspicious / 5.0, 1.0) * 0.5 +
+                min(blocked_ratio, 1.0) * 0.3 +
+                (p_block or 0.0) * 0.2
+            )
+            risk_score = round(p_block * 100) if p_block is not None else None
+            _log(f"\U0001f4ca Уровни: структурный={structural_score:.0%} параметрический={parametric_score:.0%} поведенческий={behavioral_score:.0%}")
+            verdict = "BLOCK" if decision == "BLOCK" else "ALLOW" if decision == "ALLOW" else "REVIEW"
+            return {
+                "verdict": verdict, "decision": decision, "risk_score": risk_score,
+                "package": "Сетевой снимок", "version": str(event_id)[:12],
+                "baseline_version": None, "threat_ru": result.get("summary", "")[:180],
+                "hash_control": None, "analysis_mode": "nn_only",
+                "score": p_block, "threshold": 0.1, "block_threshold": 0.9,
+                "timing_ms": {"total": 0}, "rules": [], "public_intel": {},
+                "levels": {
+                    "structural": structural_score,
+                    "parametric": parametric_score,
+                    "behavioral": behavioral_score,
+                },
+                "_nn_result": result,
+            }
+
+        def on_audit(res_ev):
+            # Добавляем в очередь аудита для самообучения (REVIEW/BLOCK с вероятностью AUDIT_RATE)
+            network_result = res_ev.get("_nn_result") or {}
+            features = network_result.get("features")
+            if not isinstance(features, dict):
+                return res_ev
+            try:
+                online_learn.maybe_queue_network(
+                    DATA, event_id, snap_json,
+                    res_ev.get("decision", "REVIEW"),
+                    features,
+                )
+            except Exception as error:  # noqa: BLE001 — surface queue failures in the analysis log
+                _log(f"Не удалось сохранить снимок в очередь аудита: {type(error).__name__}: {error}")
+            return res_ev
+
+        def on_done(ev):
+            self._check_last_event_id = event_id
+            self._check_progress_bar.setValue(100)
+            verdict = ev.get("verdict", "REVIEW")
+            rs = ev.get("risk_score", 0)
+            decision_ru = {"ALLOW": "ДОПУСТИТЬ", "BLOCK": "ЗАБЛОКИРОВАТЬ", "REVIEW": "НА ПРОВЕРКУ"}.get(verdict, verdict)
+            risk_text = f"риск {rs}/100" if rs is not None else "нет подтверждённой оценки риска"
+            self._check_status_lbl.setText(f"\u2705 Анализ завершён: {decision_ru}  ({risk_text})")
+            self._show_event_nn(ev)
+            QTimer.singleShot(4000, lambda: self._check_progress_card.setVisible(False))
+
+        worker = self.run_bg(job, lambda ev: on_done(on_audit(ev)), self.check_btn)
+        worker.finished.connect(lambda: setattr(self, "_check_busy", False))
+
+    @Slot()
+    @Slot()
+    def _update_check_log(self):
+        """Updates progress log text in GUI thread."""
+        lines = getattr(self, "_check_log_lines", [])
+        total_steps = 5
+        step = len(lines)
+        pct = min(10 + int(step / total_steps * 85), 95)
+        self._check_progress_bar.setValue(pct)
+        log_html = "<br>".join(
+            f"<span style='color:#8a8f99'>&bull;</span> {ln}"
+            for ln in lines
+        )
+        self._check_log.setText(log_html or "⏳ Инициализация…")
 
     def _toggle_advanced(self):
-        """Разворачивает/сворачивает блок дополнительных параметров — скрыт по умолчанию, чтобы при первом
-        запуске на странице было видно только главное: куда указать пакет и кнопку «показать на примере»."""
-        show = not self._adv_body.isVisible()
-        self._adv_body.setVisible(show)
-        self.adv_toggle.setText(("▾  " if show else "▸  ") + "Дополнительные параметры (стадия и политика проверки)")
+        """Stub kept for compatibility."""
+        pass
 
-    # ------------------------------------------------------------ автопроверка каталога (без кнопок и галочек)
     def _sync_watch(self, text):
-        """Как только указан каталог пакета, он сам проверяется и сам наблюдается — без отдельного включения.
-
-        Путь запоминается, а дальше ничего выбирать и нажимать не нужно: проверка идёт сама при появлении
-        пути и повторяется сама при каждом изменении файлов в нём. Чтобы остановить наблюдение — очистите поле."""
-        self.settings.setValue("watch_pkg", text)
-        self.settings.sync()
-        pkg = text.strip()
-        if not pkg:
-            self._watch_timer.stop()
-            self._watch_seen = None
-            self._watch_fingerprint = None
-            self._watch_last_fingerprint_at = 0.0
-            self.watch_note.setText("Автопроверка: укажите каталог реального пакета кнопкой «Обзор…» "
-                                    "или поместите его во входящую папку.")
-            return
-        if not (Path(pkg) / "manifest.json").exists():
-            self._watch_timer.stop()
-            self._watch_seen = None
-            self._watch_fingerprint = None
-            self._watch_last_fingerprint_at = 0.0
-            self.watch_note.setText(f"Автопроверка приостановлена: в «{pkg}» нет manifest.json.")
-            return
-        self._watch_seen = None
-        self._watch_fingerprint = None
-        self._watch_last_fingerprint_at = 0.0
-        if not self._watch_timer.isActive():
-            self._watch_timer.start(4000)
-        QTimer.singleShot(150, self._watch_tick)
-        self.watch_note.setText(f"Автопроверка включена: «{pkg}» проверяется сам при каждом изменении, "
-                                "без выбора и без кнопок.")
+        pass
 
     def _watch_tick(self):
-        """Наблюдение за выбранным каталогом: изменение файлов запускает проверку само, без участия пользователя."""
-        pkg = self.pkg.text()
-        p = Path(pkg) if pkg else None
-        if self._workers or not p or not (p / "manifest.json").exists():
-            return
-        path_key = str(p.resolve())
-        previous = self._watch_seen
-        full_hash_due = time.monotonic() - self._watch_last_fingerprint_at >= 60.0
+        pass
 
-        def inspect(_):
-            try:
-                from .collect import fingerprint
-                files = [item for item in p.rglob("*") if item.is_file()]
-                stats = [item.stat() for item in files]
-                signature = (len(stats), sum(stat.st_size for stat in stats),
-                             max((stat.st_mtime_ns for stat in stats), default=0))
-                changed = signature != previous
-                digest = fingerprint(p) if changed or full_hash_due or self._watch_fingerprint is None else None
-                return signature, digest, None
-            except (OSError, ValueError) as error:
-                return None, None, str(error)
 
-        def inspected(result):
-            signature, digest, error = result
-            if str(Path(self.pkg.text()).resolve()) != path_key:
-                return
-            if error:
-                self.watch_note.setText(f"Автопроверка: не удалось прочитать пакет; будет повтор: {error}")
-                return
-            self._watch_seen = signature
-            if digest is None:
-                return
-            self._watch_last_fingerprint_at = time.monotonic()
-            if digest != self._watch_fingerprint:
-                self._watch_fingerprint = digest
-                self._check()
-
-        self.run_bg(inspect, inspected, silent=True)
-
-    def _show_event(self, ev):
+    def _show_event(self, ev, external_refresh=False):
         self._set_badge(ev["verdict"])
         rs = ev.get("risk_score")
         if rs is None and isinstance(ev.get("score"), (int, float)):
@@ -1445,13 +1770,21 @@ class MainWindow(QMainWindow):
             color = "#e5484d" if (v or 0) >= 0.5 else "#2bb7ab"
             bar.setStyleSheet(f"QProgressBar::chunk {{ background: {color}; border-radius: 4px; }}")
         self.suspects.setRowCount(0)
-        for s in ev.get("suspects", []):
+        suspects = ev.get("suspects") or []
+        for s in suspects:
             add_row(self.suspects, [_component_ru(s["component"]), f"{s['score']:.2f}"])
+        if not suspects:
+            self.suspects.setRowCount(1)
+            self.suspects.setSpan(0, 0, 1, 2)
+            message = ("В записи проверки нет данных локализации."
+                       if ev.get("analysis_mode") != "reference_missing"
+                       else "Локализация недоступна без доверенного эталона.")
+            self.suspects.setItem(0, 0, QTableWidgetItem(message))
         acts = ev.get("actions", [])
         self.actions.setText("<br>".join(f"•&nbsp; {a}" for a in acts) if acts else
                              "<span style='color:#8a8f99'>Действия не требуются: пакет допущен.</span>")
         self._refresh_status()
-        if ev.get("verdict") == "BLOCK":
+        if ev.get("verdict") == "BLOCK" and not external_refresh:
             self._auto_block_report(ev)
             self._notify_block(ev)
 
@@ -1756,6 +2089,14 @@ class MainWindow(QMainWindow):
         row.addWidget(self.e_period_to)
         row.addWidget(self.e_period_btn)
         row.addWidget(self.e_auto_note)
+        self.ev_verdict_chart = VerdictBars()
+        self.ev_verdict_chart.empty_text = "Нет событий с меткой времени в текущей выборке."
+        self.ev_threat_chart = HBars()
+        self.ev_threat_chart.empty_text = "Событий в текущей выборке пока нет."
+        two = QHBoxLayout()
+        two.addWidget(card(self.ev_verdict_chart, title="Вердикты во времени (текущая выборка)"), 3)
+        two.addWidget(card(self.ev_threat_chart, title="По типу угрозы (текущая выборка)"), 2)
+        p.lay.addLayout(two)
         p.lay.addWidget(card(row, self.e_table))
         p.lay.addWidget(card(self.e_detail, title="Событие целиком (JSON)"))
         p.lay.addStretch(1)
@@ -1801,6 +2142,12 @@ class MainWindow(QMainWindow):
         self.events = self._read_events()[-500:][::-1]
         needle = self.e_filter.text().strip().lower()
         shown = [ev for ev in self.events if not needle or needle in ev.get("package", "").lower()]
+        self.ev_verdict_chart.set_events(shown)
+        threat_counts: dict[str, int] = {}
+        for ev in shown:
+            key = _threat_detail(ev.get("threat"))[0]
+            threat_counts[key] = threat_counts.get(key, 0) + 1
+        self.ev_threat_chart.set_rows(sorted(threat_counts.items(), key=lambda kv: -kv[1])[:12])
         self.e_table.setSortingEnabled(False)              # на время перестройки — иначе Qt путает порядок вставки
         self.e_table.setRowCount(0)
         for ev in shown:
@@ -1987,9 +2334,11 @@ class MainWindow(QMainWindow):
         row.addStretch(1)
         p.lay.addWidget(card(g, row, self.t_bar, self.t_note, title="Новый цикл обучения"))
         self.label_coverage_note = label("", muted=True, wrap=True)
+        self.label_coverage_chart = HBars()
+        self.label_coverage_chart.empty_text = "Карточек свидетельств пока не импортировано."
         self.label_coverage_table = table(["Класс", "Предложено", "Подтверждено", "Оценка качества"], 0)
         self.label_coverage_table.setMinimumHeight(310)
-        p.lay.addWidget(card(self.label_coverage_note, self.label_coverage_table,
+        p.lay.addWidget(card(self.label_coverage_note, self.label_coverage_chart, self.label_coverage_table,
                              title="Покрытие классов реальными свидетельствами"))
         self._load_label_coverage()
         self.t_log = QPlainTextEdit(readOnly=True)
@@ -2052,8 +2401,11 @@ class MainWindow(QMainWindow):
             coverage = LabelRegistry(DATA / "label_registry.sqlite").coverage()
         except Exception as error:
             self.label_coverage_table.setRowCount(0)
+            self.label_coverage_chart.set_rows([])
             self.label_coverage_note.setText(f"Не удалось прочитать реестр разметки: {error}")
             return
+        self.label_coverage_chart.set_rows([(CLASS_RU[name], coverage["classes"][name]["proposed_cases"])
+                                            for name in CLASSES])
         self.label_coverage_table.setSortingEnabled(False)
         self.label_coverage_table.setRowCount(0)
         for name in CLASSES:
@@ -2213,148 +2565,509 @@ class MainWindow(QMainWindow):
                     "Сначала требуется корпус реальных пакетов с проверенной разметкой и происхождением.", "warn")
 
     # ------------------------------------------------------------ страница «Настройки»
-    def _page_copilot(self):
-        p = Page("ИИ-помощник сети", "Локальная модель анализирует текущую сетевую телеметрию и read-only состояние функций IntegrityGuard. Документы и файлы помощником не читаются.")
-        self.cp_status = label(
-            "Ollama получает только агрегированные сетевые счётчики, метаданные соединений и безопасную сводку приложения. Пакеты не захватываются; firewall не меняется.",
-            muted=True, wrap=True)
-        self.cp_status.setObjectName("copilot_status")
-        p.lay.addWidget(card(self.cp_status, title="Состояние помощника"))
+    def _page_nn(self):
+        p = Page("Нейросеть трафика", "Модель использует опубликованные метки реальных сетевых наборов. "
+                                      "Локальные прогнозы не считаются разметкой и не запускают дообучение.")
+        self.nn_training_chart = TrainingHistoryChart()
+        self.nn_training_status = label("История эпох пока не записана. График появится только при реальном запуске обучения.",
+                                         muted=True, wrap=True)
+        self.nn_training_progress = QProgressBar()
+        self.nn_training_progress.setRange(0, 100)
+        self.nn_training_progress.setValue(0)
+        self.nn_training_progress.setFormat("нет активного обучения")
+        self.nn_training_scheme = QComboBox()
+        self.nn_training_scheme.addItem("Последняя схема", None)
+        self.nn_training_scheme.currentIndexChanged.connect(self._refresh_nn_training_chart)
+        p.lay.addWidget(card(self.nn_training_progress, self.nn_training_scheme, self.nn_training_chart,
+                             self.nn_training_status,
+                             label("Train loss и Development NLL показаны по левой шкале; нижняя CI полноты "
+                                   "на каждом dev-захвате — по правой. Все значения взяты из завершённых эпох. "
+                                   "Dev-метрики служат только для выбора кандидата и не являются независимым тестом.",
+                                   muted=True, wrap=True),
+                             title="Ход обучения нейросети"))
+        self._nn_training_history_path = DATA / "network-training-history.jsonl"
+        self._poll_nn_training_history()
+        self._nn_training_timer = QTimer(self)
+        self._nn_training_timer.setInterval(2000)
+        self._nn_training_timer.timeout.connect(self._poll_nn_training_history)
+        self._nn_training_timer.start()
+        from .network_flow_model import source_labeled_candidate_status
+        candidate = source_labeled_candidate_status(
+            RESOURCE_ROOT / "models" / "network_flow_v3_candidate.pt")
+        if candidate.get("status") != "available":
+            p.lay.addWidget(card(label(
+                "Модель недоступна: " + candidate.get("reason", "не прошла проверку происхождения данных."),
+                muted=True, wrap=True), title="Состояние модели"))
+            p.lay.addStretch(1)
+            return p
 
-        self.cp_question = QLineEdit(placeholderText="Например: оцени текущий трафик и проверь состояние IntegrityGuard")
-        self.cp_question.returnPressed.connect(self._copilot_search)
-        self.cp_model = QComboBox()
-        self.cp_model.setEditable(True)
-        self.cp_model.setInsertPolicy(QComboBox.NoInsert)
-        self.cp_model.lineEdit().setPlaceholderText("Локальная модель Ollama, например qwen3.5:4b")
-        self.cp_model.setEditText(str(self.settings.value("copilot_model", "qwen3.5:4b")))
-        self.cp_search = QPushButton("Оценить сеть / состояние приложения", objectName="primary")
-        self.cp_search.clicked.connect(self._copilot_search)
-        self.cp_refresh = QPushButton("Обновить модели")
-        self.cp_refresh.clicked.connect(self._copilot_refresh_models)
-        self.cp_results = QPlainTextEdit(readOnly=True)
-        self.cp_results.setPlaceholderText("Рекомендация по живым сетевым метаданным или данные read-only функций IntegrityGuard появятся здесь.")
-        self.cp_results.setMinimumHeight(300)
-        model_row = QHBoxLayout()
-        model_row.addWidget(self.cp_model, 1)
-        model_row.addWidget(self.cp_refresh)
-        p.lay.addWidget(card(self.cp_question, model_row, self.cp_search, title="Сетевой запрос"))
-        p.lay.addWidget(card(self.cp_results, title="Результат мониторинга"))
+        metrics = candidate.get("independent_test_metrics") or {}
+        per_capture = candidate.get("per_capture_metrics") or {}
+        test_counts = metrics.get("combined_counts") or {
+            "attack": int(metrics.get("n_attack", 0) or 0),
+            "benign": int(metrics.get("n_benign", 0) or 0),
+        }
+        train_captures = ", ".join(candidate.get("train_captures") or [])
+        test_captures = ", ".join(candidate.get("independent_test_captures") or [])
+        threshold = float(candidate.get("threshold") or 0.5)
+        summary = [
+            f"Источник меток: опубликованные авторами CTU-13; семейство набора: {candidate.get('dataset_family', 'не указано')}.",
+            f"Разбиение: обучение {train_captures}; валидация {candidate.get('validation_capture')}; независимый тест {test_captures}.",
+        ]
+        if metrics:
+            summary.append(
+                f"Независимый тест при пороге {threshold:.5f}: полнота атак "
+                f"{float(metrics.get('attack_recall') or 0):.1%}, ложные срабатывания "
+                f"{float(metrics.get('benign_false_positive_rate') or 0):.3%}, "
+                f"точность положительных прогнозов {float(metrics.get('attack_precision') or 0):.1%} "
+                "совокупно; release-критерии считаются отдельно для каждого захвата.")
+        summary.append(
+            "Кандидат предназначен для рекомендаций. На целевой сети качество не измерено; "
+            "правила Firewall не меняются.")
+        p.lay.addWidget(card(label(" ".join(summary), muted=True, wrap=True),
+                             title="Модель и происхождение меток"))
+
+        # --- Production мониторинг нейросети (вверху страницы) ---
+        self.nn_score_stream = NNScoreStream(capacity=200)
+        self.nn_score_stream.empty_text = "Ожидание оценки полных потоков Pktmon…"
+        self.nn_udp_hist = BenignUDPHistogram(bins=40)
+        self.nn_udp_hist.empty_text = (
+            "Нет UDP-потоков, закрытых 1-секундным тайм-аутом бездействия в текущих захватах.")
+        self.nn_monitor_status_label = label(self._nn_monitor_status, muted=True, wrap=True)
+
+        nn_stats_row = QHBoxLayout()
+        self.nn_stat_total = label("—", "h2")
+        self.nn_stat_attack = label("—", "h2")
+        self.nn_stat_udp_fp = label("—", "h2")
+        self.nn_stat_p999 = label("—", "h2")
+        for stat_val, stat_name in (
+            (self.nn_stat_total, "потоков всего"),
+            (self.nn_stat_attack, "выше порога"),
+            (self.nn_stat_udp_fp, "UDP выше порога"),
+            (self.nn_stat_p999, "UDP p99.9 P(attack)"),
+        ):
+            stat_val.setAlignment(Qt.AlignCenter)
+            stat_name_lbl = label(stat_name, muted=True)
+            stat_name_lbl.setAlignment(Qt.AlignCenter)
+            col = QVBoxLayout()
+            col.addWidget(stat_val)
+            col.addWidget(stat_name_lbl)
+            nn_stats_row.addLayout(col)
+
+        p.lay.addWidget(card(
+            nn_stats_row,
+            self.nn_score_stream,
+            self.nn_monitor_status_label,
+            label("Каждая точка — оценка полного потока Pktmon. Бирюзовое кольцо = UDP. "
+                  "Выше порога означает рекомендацию для обзора; прогноз не является подтверждённой меткой.",
+                  muted=True, wrap=True),
+            title="Оценка P(attack) по потокам"))
+
+        p.lay.addWidget(card(
+            self.nn_udp_hist,
+            label("UDP-поток учитывается после наблюдаемой секунды бездействия до остановки сегмента Pktmon. "
+                  "Это правило завершения потока для оценки, а не подтверждённая метка; истинный класс неизвестен.",
+                  muted=True, wrap=True),
+            title="Распределение P(attack) для UDP-потоков"))
+
+        # таймер обновления мониторинга (каждые 5 секунд)
+        self._nn_journal_path = DATA / "online" / "network_runtime_metrics.sqlite"
+        try:
+            self._nn_journal_mtime_ns = self._nn_journal_path.stat().st_mtime_ns
+        except OSError:
+            self._nn_journal_mtime_ns = None
+        self._nn_journal_busy = False
+        self._nn_journal_retry_after = 0.0
+        self._nn_monitor_timer = QTimer(self)
+        self._nn_monitor_timer.setInterval(5000)
+        self._nn_monitor_timer.timeout.connect(self._poll_nn_monitor_journal)
+        self._nn_monitor_timer.start()
+        self._nn_monitor_threshold = float(threshold)
+        if not self._nn_monitor_flows:
+            try:
+                from .network_runtime_evidence import recent_captured_flows
+                from .network_flow_model import assess_completed_packet_flows
+                recent = recent_captured_flows(DATA / "online" / "network_runtime_metrics.sqlite")
+                if recent.get("flows"):
+                    restored = assess_completed_packet_flows(
+                        recent["flows"], RESOURCE_ROOT / "models" / "network_flow_v3_candidate.pt")
+                    if restored.get("status") == "recommendation_candidate":
+                        self._nn_monitor_flows.extend(restored.get("flow_scores") or [])
+                        self._nn_monitor_status = (
+                            f"Восстановлены и заново оценены последние {len(self._nn_monitor_flows)} "
+                            "завершённых потоков из журнала; все локальные метки неизвестны.")
+            except (OSError, ValueError, TypeError):
+                pass
+        self._refresh_nn_monitor()
+
+        train_ids = set(candidate.get("train_captures") or [])
+        validation_id = candidate.get("validation_capture")
+        test_ids = set(candidate.get("independent_test_captures") or [])
+        source_test_ready = bool(metrics.get("n", 0) and test_ids
+                                 and not (train_ids & test_ids)
+                                 and validation_id not in test_ids)
+        target_eval = candidate.get("target_network_evaluation")
+        from .network_statistics import (
+            MIN_BENIGN_SUPPORT_ZERO_FP, MIN_RELEASE_ATTACK_SUPPORT,
+            RELEASE_FPR_CI_CEILING,
+            hash_locked_target_evaluation,
+        )
+        target_test_ready = hash_locked_target_evaluation(
+            target_eval, candidate.get("checkpoint_sha256"))
+        try:
+            from .network_runtime_evidence import runtime_summary
+            runtime = runtime_summary(DATA / "online" / "network_runtime_metrics.sqlite")
+        except (OSError, ValueError, TypeError):
+            runtime = {"sample_count": 0, "p95_inference_ms": None,
+                       "target_load_tested": False, "drop_counters_observed": False}
+        runtime_sample_count = int(runtime.get("sample_count", 0) or 0)
+        active_checkpoint_hash = str(candidate.get("checkpoint_sha256") or "")
+        runtime_candidate_samples = int((runtime.get("candidate_provenance_by_sha256") or {}).get(
+            active_checkpoint_hash, 0) or 0)
+        runtime_complete_flows = int((runtime.get("candidate_linked_complete_flows_by_sha256") or {}).get(
+            active_checkpoint_hash, 0) or 0)
+        runtime_linked_segments = int((runtime.get("candidate_linked_segment_counts_by_sha256") or {}).get(
+            active_checkpoint_hash, 0) or 0)
+        runtime_flow_ready = (
+            runtime_candidate_samples > 0
+            and runtime_complete_flows > 0
+            and runtime.get("capture_integrity_valid") is True
+            and runtime.get("captured_flow_integrity_valid") is True
+            and runtime.get("candidate_capture_link_integrity_valid") is True
+        )
+        capture_quality_rows = []
+        for capture, capture_data in per_capture.items():
+            selected = (capture_data or {}).get("validation_selected_threshold") or {}
+            from .network_statistics import confusion_metrics
+            computed = confusion_metrics(selected)
+            recall_ci = computed["attack_recall_ci95_wilson"] if computed else []
+            fpr_ci = computed["benign_false_positive_rate_ci95_wilson"] if computed else []
+            passed = (computed is not None
+                      and float(recall_ci[0]) >= 0.80
+                      and float(fpr_ci[1]) <= RELEASE_FPR_CI_CEILING)
+            capture_quality_rows.append((capture, computed or {}, recall_ci, fpr_ci, passed))
+        capture_quality_ready = bool(capture_quality_rows) and all(row[4] for row in capture_quality_rows)
+        target_metrics = candidate.get("target_network_metrics") or (
+            target_eval.get("metrics", {}) if isinstance(target_eval, dict) else {})
+        from .network_statistics import confusion_metrics
+        target_computed = confusion_metrics(target_metrics)
+        target_attack_n = target_computed["n_attack"] if target_computed else 0
+        target_benign_n = target_computed["n_benign"] if target_computed else 0
+        target_fpr_ci = (target_computed["benign_false_positive_rate_ci95_wilson"]
+                         if target_computed else [])
+        target_fpr_ready = (target_test_ready
+                            and target_attack_n >= MIN_RELEASE_ATTACK_SUPPORT
+                            and target_benign_n >= MIN_BENIGN_SUPPORT_ZERO_FP
+                            and len(target_fpr_ci) == 2
+                            and float(target_fpr_ci[1]) <= RELEASE_FPR_CI_CEILING)
+        sensor_validation = candidate.get("target_sensor_validation") or {}
+        packet_drop_rate = sensor_validation.get("packet_drop_rate")
+        sensor_completeness_ready = (sensor_validation.get("validated") is True
+                                     and packet_drop_rate is not None
+                                     and float(packet_drop_rate) <= 0.001)
+        operational_performance = candidate.get("operational_performance") or {}
+        inference_latency_ms = operational_performance.get("p95_inference_latency_ms")
+        latency_ready = (inference_latency_ms is not None
+                         and float(inference_latency_ms) <= 100.0
+                         and operational_performance.get("target_load_tested") is True)
+        firewall_validation = candidate.get("firewall_validation") or {}
+        firewall_ready = (firewall_validation.get("passed") is True
+                          and firewall_validation.get("audit_verified") is True
+                          and firewall_validation.get("rollback_verified") is True)
+        gates = [
+            ("Происхождение корпуса и SHA-256 checkpoint/manifest проверены", True),
+            ("Обученный checkpoint доступен", bool(train_ids)),
+            ("Есть отдельные validation и test захваты", source_test_ready),
+            ("Per-flow модель подключена к Pktmon; есть успешный реальный сегмент",
+             runtime_flow_ready),
+            ("По каждому test-захвату нижняя CI recall ≥80%, верхняя CI FPR ≤0,25%",
+             capture_quality_ready),
+            ("Проведён отдельный размеченный test на целевой сети", target_test_ready),
+            ("Целевая выборка: ≥100 атак и достаточная benign-поддержка для верхней CI FPR ≤0,25%",
+             target_fpr_ready),
+            ("Измерены потери сенсора; packet-drop rate ≤0,1%", sensor_completeness_ready),
+            ("P95 inference ≤100 мс на целевой нагрузке", latency_ready),
+            ("Путь блокировки, аудит действий и откат прошли проверку", firewall_ready),
+        ]
+        completed_gates = sum(1 for _name, passed in gates if passed)
+        readiness_percent = round(completed_gates * 100 / len(gates))
+        self.nn_readiness_bar = QProgressBar()
+        self.nn_readiness_bar.setRange(0, 100)
+        self.nn_readiness_bar.setValue(readiness_percent)
+        self.nn_readiness_bar.setFormat(f"{readiness_percent}% · {completed_gates} из {len(gates)} этапов")
+        self.nn_readiness_bar.setToolTip(
+            "Доля закрытых технических этапов допуска. Это не точность, не вероятность обнаружения "
+            "и не процент знаний модели.")
+        gate_lines = [f"{'✓' if passed else '○'}  {name}" for name, passed in gates]
+        if not runtime_flow_ready:
+            gate_lines.append(
+                f"Pktmon-путь: {runtime_candidate_samples} inference-записей с provenance кандидата, "
+                f"{runtime_complete_flows} полных потоков из {runtime_linked_segments} связанных сегментов, "
+                "связанных с inference кандидата; "
+                "этап требует валидные цепочки и прямую связь этих записей.")
+        if not capture_quality_ready and capture_quality_rows:
+            for capture, selected, recall_ci, fpr_ci, passed in capture_quality_rows:
+                if len(recall_ci) == 2 and len(fpr_ci) == 2:
+                    gate_lines.append(
+                        f"   Захват {capture}: recall {float(selected.get('attack_recall') or 0):.1%} "
+                        f"(95% CI {float(recall_ci[0]):.1%}–{float(recall_ci[1]):.1%}); "
+                        f"FPR {float(selected.get('benign_false_positive_rate') or 0):.3%} "
+                        f"(верхняя 95% CI {float(fpr_ci[1]):.3%})")
+        gate_lines.extend((
+            "Порог стабильности заранее задан для каждого захвата: нижняя 95% CI полноты ≥80%, "
+            "верхняя двусторонняя 95% Wilson CI ложных срабатываний ≤0,25%.",
+            "Для target-test требуется не менее 100 атак и достаточная benign-поддержка; неизвестные потоки "
+            "остаются без метки и не входят в оценку. CI пересчитываются из TP/FP/FN/TN. Для FPR ≤0,25% "
+            "при нуле ложных срабатываний нужно минимум 1 533 benign-потока (95% Wilson); при FP нужно больше.",
+        ))
+        gate_status = label("\n".join(gate_lines), muted=True, wrap=True)
+        observed_p95 = runtime.get("p95_inference_ms")
+        if observed_p95 is None:
+            gate_lines.append("Runtime inference: ещё нет успешных Pktmon-backed измерений.")
+        else:
+            gate_lines.append(
+                f"Runtime inference: наблюдаемый P95 {observed_p95:.3f} мс "
+                f"по {runtime_sample_count} реальным сегментам; это не целевой нагрузочный тест.")
+        gate_lines.append(
+            "Target-test принимается только при наличии SHA-256 захвата и набора меток, "
+            "зафиксированных до оценки этой контрольной точкой.")
+        gate_lines.append(
+            "Потери сенсора: счётчики Pktmon собираются отдельно; оценка packet-drop rate пока не подтверждена.")
+        gate_status.setText("\n".join(gate_lines))
+        p.lay.addWidget(card(self.nn_readiness_bar, gate_status,
+                             label("Обучение текущего checkpoint завершено. Прогресс показывает "
+                                   "10 равновесных этапов допуска, а не точность или знания модели. "
+                                   "Live-прогнозы не используются как метки.",
+                                   muted=True, wrap=True),
+                             title="Готовность к релизу сетевой модели"))
+
+        class_rows = []
+        if test_counts:
+            class_rows = [("Атака — метка набора", int(test_counts.get("attack", 0))),
+                          ("Норма — метка набора", int(test_counts.get("benign", 0)))]
+        class_chart = HBars()
+        class_chart.empty_text = "Нет размеченных примеров независимого теста."
+        class_chart.set_rows(class_rows)
+        p.lay.addWidget(card(class_chart,
+                             label(f"Всего в тесте: {int(test_counts.get('attack', 0)) + int(test_counts.get('benign', 0)):,}. "
+                                   "Показаны опубликованные метки CTU-13; неизвестные и фоновые метки исключены. "
+                                   "Это source-test, не оценка вашей целевой сети.", muted=True, wrap=True),
+                             title="Независимый тест CTU-13"))
+
+        capture_rows = []
+        for capture in sorted(per_capture):
+            selected = (per_capture[capture] or {}).get("validation_selected_threshold") or {}
+            if selected:
+                capture_rows.append((f"Захват {capture}: полнота атак",
+                                     round(float(selected.get("attack_recall") or 0) * 100)))
+        if capture_rows:
+            capture_chart = HBars()
+            capture_chart.set_rows(capture_rows)
+            p.lay.addWidget(card(capture_chart,
+                                 label("Разброс между независимыми захватами показывает, что результат зависит от сценария.",
+                                       muted=True, wrap=True),
+                                 title="Проверка по отдельным захватам"))
+
         p.lay.addStretch(1)
         return p
 
-    def _copilot_search(self):
-        if self._copilot_worker is not None and self._copilot_worker.isRunning():
-            return
-        query = self.cp_question.text().strip()
-        if not query:
-            self.notify("Введите запрос о сети или состоянии IntegrityGuard.", "warn")
-            return
-        self.cp_results.setPlainText("Получаю текущую сетевую телеметрию и read-only состояние функций IntegrityGuard.")
-        model = self.cp_model.currentText().strip()
-        if model:
-            self.settings.setValue("copilot_model", model)
-            self.settings.sync()
+    def _refresh_nn_monitor(self):
+        """Refresh live scores from Pktmon inference results held in this window."""
+        thr = getattr(self, "_nn_monitor_threshold", 0.5)
+        recent_flows = list(getattr(self, "_nn_monitor_flows", ()))
+        self.nn_score_stream.set_flows(recent_flows, thr)
+        udp_scores = [float(f["score"]) for f in recent_flows if f.get("is_udp")]
+        self.nn_udp_hist.set_scores(udp_scores, thr)
+        threshold_hits = sum(1 for f in recent_flows if float(f.get("score", 0)) >= thr)
+        udp_hits = sum(1 for f in recent_flows if f.get("is_udp") and float(f.get("score", 0)) >= thr)
+        if udp_scores:
+            sorted_udp = sorted(udp_scores)
+            p999_idx = min(int(len(sorted_udp) * 0.999), len(sorted_udp) - 1)
+            self.nn_stat_p999.setText(f"{sorted_udp[p999_idx]:.4f}")
+        else:
+            self.nn_stat_p999.setText("—")
+        self.nn_stat_total.setText(str(len(recent_flows)))
+        self.nn_stat_attack.setText(str(threshold_hits))
+        self.nn_stat_udp_fp.setText(str(udp_hits))
+        if hasattr(self, "nn_monitor_status_label"):
+            self.nn_monitor_status_label.setText(getattr(self, "_nn_monitor_status", ""))
 
-        from .copilot_audit import CopilotAudit
-        principal = getpass.getuser()
-        tool_context = self._copilot_tool_context()
-        audit = CopilotAudit(DATA / "copilot_audit.sqlite")
+    def _poll_nn_training_history(self):
+        """Render only recorded training events; never invent progress between epochs."""
+        path = getattr(self, "_nn_training_history_path", None)
+        if path is None or not path.is_file():
+            self.nn_training_chart.set_history([])
+            self.nn_training_progress.setValue(0)
+            self.nn_training_progress.setFormat("нет активного обучения")
+            self.nn_training_status.setText("История обучения ещё не записана. Кривые появятся после первого запуска.")
+            return
+        try:
+            with path.open("rb") as stream:
+                stream.seek(0, os.SEEK_END)
+                size = stream.tell()
+                stream.seek(max(0, size - 2_000_000), os.SEEK_SET)
+                if stream.tell():
+                    stream.readline()
+                raw_lines = stream.read().decode("utf-8", errors="replace").splitlines()
+            events = []
+            for line in raw_lines[-5000:]:
+                if not line.strip():
+                    continue
+                try:
+                    events.append(json.loads(line))
+                except ValueError:
+                    continue  # writer may be between append and newline
+            events = [event for event in events if isinstance(event, dict) and event.get("run_id")]
+            if not events:
+                return
+            run_id = events[-1]["run_id"]
+            run_events = [event for event in events if event.get("run_id") == run_id]
+            epoch_events = [event for event in run_events if event.get("event") == "epoch"]
+            scheme = epoch_events[-1].get("scheme") if epoch_events else None
+            schemes = list(dict.fromkeys(event.get("scheme") for event in epoch_events if event.get("scheme")))
+            selected_scheme = self.nn_training_scheme.currentData()
+            self.nn_training_scheme.blockSignals(True)
+            current_scheme_items = [self.nn_training_scheme.itemData(i)
+                                    for i in range(self.nn_training_scheme.count())]
+            if current_scheme_items != [None, *schemes]:
+                self.nn_training_scheme.clear()
+                self.nn_training_scheme.addItem("Последняя схема", None)
+                for item in schemes:
+                    self.nn_training_scheme.addItem(str(item), item)
+                selected_index = self.nn_training_scheme.findData(selected_scheme)
+                if selected_index >= 0:
+                    self.nn_training_scheme.setCurrentIndex(selected_index)
+                elif self.nn_training_scheme.count():
+                    self.nn_training_scheme.setCurrentIndex(0)
+            self.nn_training_scheme.blockSignals(False)
+            selected_scheme = self.nn_training_scheme.currentData() or scheme
+            scheme_events = [event for event in epoch_events if event.get("scheme") == selected_scheme]
+            self._nn_training_events = epoch_events
+            self._nn_training_chart_scheme = selected_scheme
+            self.nn_training_chart.set_history(scheme_events)
+            latest = run_events[-1]
+            context = (f"Run {run_id[:10]} · train захваты {', '.join(latest.get('train_captures', []))} · "
+                       f"development захваты {', '.join(latest.get('development_captures', []))}.")
+            timestamp = latest.get("timestamp_utc")
+            age_seconds = None
+            if timestamp:
+                try:
+                    written_at = datetime.fromisoformat(str(timestamp).replace("Z", "+00:00"))
+                    age_seconds = max(0.0, (datetime.now(timezone.utc) - written_at).total_seconds())
+                except ValueError:
+                    pass
+            if latest.get("event") == "run_completed":
+                checks = latest.get("checkpoint_sha256_by_scheme") or {}
+                self.nn_training_progress.setValue(100)
+                self.nn_training_progress.setFormat("обучение завершено · все эпохи записаны")
+                hashes = ", ".join(f"{key}: {value[:12]}…" for key, value in checks.items())
+                selected_epoch_event = None
+                if scheme_events:
+                    best_epoch = int(scheme_events[-1].get("best_epoch") or 0)
+                    selected_epoch_event = next((event for event in scheme_events
+                                                 if int(event.get("epoch") or 0) == best_epoch), None)
+                selected_ci = (float(scheme_events[-1].get("best_development_min_recall_ci95_lower") or 0.0)
+                               if scheme_events else 0.0)
+                selected_threshold = (selected_epoch_event.get("development_threshold")
+                                      if selected_epoch_event else None)
+                dev_ceiling = float((latest.get("training_config") or {}).get("dev_fpr_ci_ceiling") or 0.0)
+                self.nn_training_status.setText(
+                    f"Завершено. {context} Для {selected_scheme}: лучшая minimum dev recall CI-L "
+                    f"{selected_ci:.2%}; threshold {float(selected_threshold or 0.0):.6g}; "
+                    f"dev upper FPR CI ceiling {dev_ceiling:.2%}. Checkpoint SHA-256: {hashes or 'нет'}; "
+                    f"manifest SHA-256: {str(latest.get('manifest_sha256') or 'нет')[:12]}…; "
+                    f"время: {latest.get('timestamp_utc', 'не записано')}.")
+            elif age_seconds is not None and age_seconds > 120:
+                self.nn_training_progress.setFormat("нет свежих событий обучения")
+                self.nn_training_status.setText(
+                    f"История не обновлялась {age_seconds / 60:.1f} мин; факт завершения или остановки процесса "
+                    f"не подтверждён. Последний записанный шаг и захваты: {context}")
+            elif epoch_events:
+                current = epoch_events[-1]
+                total = max(1, int(current.get("total_epochs") or 1))
+                epoch = min(total, int(current.get("epoch") or 0))
+                self.nn_training_progress.setValue(round(epoch * 100 / total))
+                self.nn_training_progress.setFormat(f"{current.get('scheme', 'схема')} · эпоха {epoch}/{total}")
+                self.nn_training_status.setText(
+                    f"Выполняется. {context} Train loss {float(current['train_loss']):.5f}; "
+                    f"Development NLL {float(current['development_nll']):.5f}; "
+                    f"минимальная dev recall CI-L "
+                    f"{float(current.get('development_min_recall_ci95_lower') or 0.0):.2%}; "
+                    f"лучший результат по критерию {float(current.get('best_development_min_recall_ci95_lower') or 0.0):.2%}; "
+                    f"dev threshold {float(current.get('development_threshold') or 0.0):.6g}; "
+                    f"dev FPR CI ceiling {float((latest.get('training_config') or {}).get('dev_fpr_ci_ceiling') or 0.0):.2%}; "
+                    f"NLL {float(current['best_development_nll']):.5f} на выбранной эпохе "
+                    f"{int(current['best_epoch'])}; ожидание остановки {int(current['patience_used'])}; "
+                    f"обновлено {current.get('timestamp_utc', 'время не записано')}.")
+            else:
+                self.nn_training_progress.setValue(0)
+                self.nn_training_progress.setFormat("подготовка обучающего запуска")
+                self.nn_training_status.setText(f"Запуск зарегистрирован; первая эпоха ещё не завершена. {context}")
+        except (OSError, UnicodeError, ValueError, TypeError, KeyError) as error:
+            self.nn_training_status.setText(f"Не удалось прочитать журнал обучения: {type(error).__name__}")
+
+    def _refresh_nn_training_chart(self):
+        events = getattr(self, "_nn_training_events", [])
+        scheme = self.nn_training_scheme.currentData() or getattr(self, "_nn_training_chart_scheme", None)
+        self.nn_training_chart.set_history([event for event in events if event.get("scheme") == scheme])
+
+    def _poll_nn_monitor_journal(self):
+        """Reload newly committed, integrity-checked flow scores without blocking the UI."""
+        self._refresh_nn_monitor()
+        if getattr(self, "_nn_journal_busy", False):
+            return
+        if time.monotonic() < getattr(self, "_nn_journal_retry_after", 0.0):
+            return
+        journal = getattr(self, "_nn_journal_path", DATA / "online" / "network_runtime_metrics.sqlite")
+        try:
+            mtime_ns = journal.stat().st_mtime_ns
+        except OSError:
+            return
+        if mtime_ns == getattr(self, "_nn_journal_mtime_ns", None):
+            return
+        self._nn_journal_mtime_ns = mtime_ns
+        self._nn_journal_busy = True
 
         def work(_progress):
-            try:
-                try:
-                    answer = answer_with_ollama(query, model, tool_context=tool_context) if model else None
-                    warning = None
-                except Exception as error:
-                    answer = None
-                    warning = f"{type(error).__name__}: {str(error)[:400]}"
-                if answer is None:
-                    warning = warning or "Не выбрана локальная модель Ollama."
-                    output, status, audit_model, calls = warning, "error", "unconfigured", []
-                else:
-                    output = answer["answer"]
-                    status = "insufficient_evidence" if answer["insufficient_evidence"] else "answered"
-                    audit_model = answer["model"]
-                    calls = answer.get("tool_calls", [])
-                audit.append(principal=principal, question=query, answer=output, model=audit_model,
-                             status=status, source_hashes=[], tool_calls=calls)
-                return answer, warning
-            except Exception as error:
-                audit.append(principal=principal, question=query,
-                             answer=f"{type(error).__name__}: {str(error)[:500]}",
-                             model=model or "unconfigured", status="error",
-                             source_hashes=[], tool_calls=[])
-                raise
+            from .network_runtime_evidence import recent_captured_flows
+            from .network_flow_model import assess_completed_packet_flows
+            recent = recent_captured_flows(journal, limit=200)
+            if recent.get("status") != "ok" or not recent.get("flows"):
+                return {"status": recent.get("status", "empty"), "flow_scores": []}
+            return assess_completed_packet_flows(
+                recent["flows"], RESOURCE_ROOT / "models" / "network_flow_v3_candidate.pt")
 
         def done(result):
-            answer, warning = result
-            blocks = []
-            if warning:
-                blocks.append(warning)
-            if answer is not None:
-                if answer["insufficient_evidence"]:
-                    blocks.append("Запрос вне поддерживаемого сетевого/операционного охвата или данных недостаточно.")
-                blocks.append(f"ИИ ({answer['model']}):\n{answer['answer']}")
-                for item in answer.get("tool_results", []):
-                    blocks.append(f"\nДанные IntegrityGuard [{item['citation_id']}] (read-only):\n"
-                                  f"{json.dumps(item['data'], ensure_ascii=False, indent=2)}")
-            blocks.append("\nПомощник не читает пользовательские документы и содержимое файлов. "
-                          "Захвата packet payload нет; вывод модели не меняет Windows Firewall. "
-                          "Хеши запросов и вызовов записываются в локальный hash-chain аудит.")
-            self.cp_results.setPlainText("\n\n".join(blocks))
+            self._nn_journal_busy = False
+            if result.get("status") == "recommendation_candidate":
+                scores = result.get("flow_scores") or []
+                self._nn_monitor_flows = deque(scores, maxlen=200)
+                self._nn_monitor_status = (
+                    f"Панель обновлена {time.strftime('%H:%M:%S')}: из проверенного журнала заново оценены "
+                    f"{len(scores)} последних полных потоков. Метки локальных потоков неизвестны; "
+                    "оценки не являются подтверждёнными классами.")
+            elif result.get("status") in ("integrity_unverified", "unreadable"):
+                # Retry after a short pause; preserve the last visible values.
+                self._nn_journal_retry_after = time.monotonic() + 15.0
+                self._nn_monitor_status = (
+                    "Динамическое обновление журнала приостановлено: целостность новых записей "
+                    "не подтверждена. Показаны последние ранее проверенные оценки.")
+            self._refresh_nn_monitor()
+
+        def failed(message):
+            self._nn_journal_busy = False
+            self._nn_journal_retry_after = time.monotonic() + 15.0
+            self._nn_monitor_status = f"Не удалось обновить оценки из журнала: {message[:240]}"
+            self._refresh_nn_monitor()
 
         worker = Worker(work, self)
-        self._copilot_worker = worker
-        self.cp_search.setEnabled(False)
         worker.done.connect(done)
-        worker.fail.connect(lambda msg: self.notify(msg, "error"))
-
-        def finish():
-            self.cp_search.setEnabled(True)
-            self._copilot_worker = None
-            if worker in self._workers:
-                self._workers.remove(worker)
-
-        worker.finished.connect(finish)
+        worker.fail.connect(failed)
+        worker.finished.connect(lambda: setattr(self, "_nn_journal_busy", False))
         self._workers.append(worker)
+        worker.finished.connect(lambda: self._workers.remove(worker) if worker in self._workers else None)
         worker.start()
 
-    def _copilot_refresh_models(self):
-        if self._copilot_worker is not None and self._copilot_worker.isRunning():
-            return
-        selected = self.cp_model.currentText().strip()
-        self.cp_refresh.setEnabled(False)
-
-        def done(names):
-            self.cp_model.clear()
-            self.cp_model.addItems(names)
-            if selected:
-                self.cp_model.setEditText(selected)
-            elif names:
-                preferred = next((n for n in names if n.startswith("qwen3.5:4b")), names[0])
-                self.cp_model.setCurrentText(preferred)
-            self.cp_status.setText(
-                f"Ollama отвечает на локальном адресе. Найдено моделей: {len(names)}. "
-                "Модель получает только телеметрию сети и read-only состояние приложения.")
-
-        worker = Worker(lambda _progress: list_ollama_models(), self)
-        self._copilot_worker = worker
-        worker.done.connect(done)
-        worker.fail.connect(lambda msg: self.cp_status.setText(
-            f"Ollama пока не обнаружена: {msg}. Проверка сети недоступна до запуска локальной модели."))
-
-        def finish():
-            self.cp_refresh.setEnabled(True)
-            self._copilot_worker = None
-            if worker in self._workers:
-                self._workers.remove(worker)
-
-        worker.finished.connect(finish)
-        self._workers.append(worker)
-        worker.start()
-
-    # ------------------------------------------------------------ страница «Настройки»
     def _page_settings(self):
         p = Page("Настройки", "Пути к реестру эталонов, модели детектора и ключу подписи пакетов.")
         self.s_reg = PathEdit("Каталог реестра (эталоны, журнал событий)")
@@ -2555,7 +3268,7 @@ jobs:
             self._auto_start()
         else:
             self.auto_timer.stop()
-            self.auto_note.setText("Автоматический режим выключен (включается в настройках).")
+            self.e_auto_note.setText("Автоматический режим выключен (включается в настройках).")
         self._guard = None
         self._refresh_status()
         self._load_metrics()
@@ -2649,7 +3362,7 @@ def main(start_minimized=False):
     if not instance.acquire():
         return
     app.aboutToQuit.connect(instance.close)
-    app.setQuitOnLastWindowClosed(False)               # окно скрывается в трей, а не завершает программу
+    app.setQuitOnLastWindowClosed(True)                # закрытие главного окна завершает процесс
     app.setStyle("Fusion")
     try:                                              # тёмные заголовки окон и системных диалогов (Qt 6.8+)
         app.styleHints().setColorScheme(Qt.ColorScheme.Dark)

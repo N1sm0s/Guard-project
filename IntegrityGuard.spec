@@ -18,7 +18,12 @@ a = Analysis(
     ['IntegrityGuard.pyw'],
     pathex=[],
     binaries=[],
-    datas=[('models/detector.pt', 'models'), ('assets', 'assets'), ('tools/network-block.ps1', 'tools')],
+    datas=[('models/detector.pt', 'models'),
+           ('models/network_flow_classifier.pt', 'models'),
+           ('models/network_flow_v3_candidate.pt', 'models'),
+           ('models/network_flow_v3_candidate_manifest.json', 'models'),
+           ('models/network_flow_v3_candidate_metrics.json', 'models'),
+           ('assets', 'assets'), ('tools/network-block.ps1', 'tools')],
     hiddenimports=['fpdf'],
     hookspath=[],
     # Training reports save PNG via Agg; no interactive matplotlib UI is used.
