@@ -350,6 +350,23 @@ class HBars(Chart):
             self._hits.append((QRectF(0, y - 3, self.width(), bh + 6), f"{name}: {v}"))
 
 
+def _fluctuation_flags(values, window=30, sigma=2.5, min_rel=0.2):
+    """Mark samples that deviate from the recent history of the same series.
+
+    A sample is a fluctuation when it differs from the mean of the previous
+    `window` samples by more than `sigma` standard deviations AND by more than
+    `min_rel` of that mean (so flat noise on a near-zero line is not flagged).
+    """
+    flags = [False] * len(values)
+    for i in range(window, len(values)):
+        base = values[i - window:i]
+        mean = sum(base) / window
+        sd = (sum((b - mean) ** 2 for b in base) / window) ** 0.5
+        if abs(values[i] - mean) > max(sigma * sd, min_rel * max(mean, 1.0)):
+            flags[i] = True
+    return flags
+
+
 class LiveLine(Chart):
     """Бегущий график одного показателя (последние N секунд)."""
 
@@ -369,8 +386,9 @@ class LiveLine(Chart):
             i = round((x - r.left()) / r.width() * (self.capacity - 1)) - (self.capacity - len(self.values))
             if 0 <= i < len(self.values):
                 self._hover = i
+                note = "\nколебание трафика" if _fluctuation_flags(self.values)[i] else ""
                 QToolTip.showText(e.globalPosition().toPoint(),
-                                  f"{self.values[i]:.0f} {self.unit}\n{len(self.values) - 1 - i} с назад", self)
+                                  f"{self.values[i]:.0f} {self.unit}\n{len(self.values) - 1 - i} с назад{note}", self)
                 return self.update()
         self._hover = None
         QToolTip.hideText()
@@ -402,6 +420,19 @@ class LiveLine(Chart):
         p.setPen(QPen(QColor(ACCENT), 2, Qt.SolidLine, Qt.RoundCap, Qt.RoundJoin))
         p.setBrush(Qt.NoBrush)
         p.drawPath(line)
+        # Red overlay: fluctuations of the traffic series (see _fluctuation_flags).
+        red = QColor("#e5484d")
+        flags = _fluctuation_flags(self.values)
+        p.setPen(QPen(red, 2.5, Qt.SolidLine, Qt.RoundCap, Qt.RoundJoin))
+        for i, flagged in enumerate(flags):
+            if flagged and i > 0:
+                p.drawLine(pts[i - 1], pts[i])
+        p.setPen(QPen(red, 1))
+        p.setBrush(red)
+        for i, flagged in enumerate(flags):
+            if flagged:
+                p.drawEllipse(pts[i], 3, 3)
+        p.setBrush(Qt.NoBrush)
         if self._hover is not None and self._hover < len(pts):
             q = pts[self._hover]
             p.setPen(QPen(QColor(MUTED), 1))
