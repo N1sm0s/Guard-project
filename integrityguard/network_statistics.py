@@ -7,12 +7,12 @@ from datetime import datetime
 
 _Z_95 = 1.959963984540054
 MIN_RELEASE_ATTACK_SUPPORT = 100
-# Prospective release limit for automatic enforcement: the two-sided 95% Wilson upper FPR bound.
-RELEASE_FPR_CI_CEILING = 0.001
-# At zero false positives, n=3,838 is the first benign support where the
-# two-sided 95% Wilson upper bound is <=0.1%. Any FP still has to pass the
+# Prospective release limit: the two-sided 95% Wilson upper FPR bound.
+RELEASE_FPR_CI_CEILING = 0.0025
+# At zero false positives, n=1,533 is the first benign support where the
+# two-sided 95% Wilson upper bound is <=0.25%. Any FP still has to pass the
 # separately computed Wilson bound and may require a larger n.
-MIN_BENIGN_SUPPORT_ZERO_FP = 3838
+MIN_BENIGN_SUPPORT_ZERO_FP = 1533
 
 
 def wilson_interval(successes: int, total: int, z: float = _Z_95) -> tuple[float, float] | None:

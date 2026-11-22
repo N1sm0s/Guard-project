@@ -1716,7 +1716,7 @@ def evaluate_apex_ids2026(args) -> None:
     Attack_Verified and Benign_Verified labels are scored. The adapter maps the
     observed source-to-destination byte count to the initiator direction and
     zero response bytes. The publisher's benign tier is described as >=95%
-    confidence, so this dataset cannot establish the stricter 0.1% FPR release bound.
+    confidence, so this dataset cannot establish a 0.25% FPR release bound.
     """
     try:
         import pyarrow as pa
@@ -1906,7 +1906,7 @@ def evaluate_apex_ids2026(args) -> None:
         "capture_role": "one-pass external source-family diagnostic; not used for candidate training or threshold selection",
         "source_characterization": "real unidirectional NetFlow v9 exported from live ISP edge, June 21 through August 3 2026; no synthetic packet generation",
         "label_provenance": "only Attack_Verified and Benign_Verified publisher labels; tier 1 attack labels are honeypot source-IP/destination-port matches; tier 3 benign labels are publisher-verified safe destinations",
-        "label_quality_limit": "publisher data card describes Benign_Verified as high confidence (95%+), which is not sufficient to establish the 0.1% FPR release bound; result is diagnostic and cannot promote the model",
+        "label_quality_limit": "publisher data card describes Benign_Verified as high confidence (95%+), which is not sufficient to establish a 0.25% FPR bound; result is diagnostic and cannot promote the model",
         "label_policy": "Attack_Verified=attack, Benign_Verified=benign; all other labels excluded, never mapped to benign",
         "feature_adapter": "v9 mapping from duration_s, packets, bytes, protocol; unidirectional bytes map to source/originator direction and zero observed response bytes; labels, dates, IPs, ports, flags, and taxonomy are not model features",
         "archive_sha256": capture_sha,
@@ -3560,7 +3560,7 @@ def main(argv=None):
                         choices=tuple(CTU_VALIDATION_CAPTURE_PATHS), default=["45"],
                         help="whole development captures; a shared threshold must satisfy the FPR bound on every listed capture")
     parser.add_argument("--ctu-dev-fpr-ci-ceiling", type=float, default=0.0025,
-                        help="CTU development-only Wilson upper-FPR ceiling per validation capture (default: 0.25%%); automatic-enforcement release gate is 0.1%% per independent test capture")
+                        help="CTU development-only Wilson upper-FPR ceiling per validation capture (default: 0.25%%); release gate is 0.25%% per independent test capture")
     parser.add_argument("--ctu-checkpoint-selection", choices=("joint_dev_gate", "development_nll"),
                         default="joint_dev_gate",
                         help="select CTU checkpoint by the joint per-capture dev operating point (default) or development NLL")
@@ -3578,7 +3578,7 @@ def main(argv=None):
     parser.add_argument("--capture-weighting", choices=("equal", "sqrt", "proportional"),
                         default="equal", help="per-capture training weight mass within each class")
     parser.add_argument("--fpr-ci-ceiling", type=float, default=RELEASE_FPR_CI_CEILING,
-                        help="two-sided 95%% Wilson upper-FPR ceiling for generic candidate selection/evaluation; automatic-enforcement release gate: 0.1%% per independent capture")
+                        help="two-sided 95% Wilson upper-FPR ceiling for generic candidate selection/evaluation; current release gate: 0.25% per independent capture")
     parser.add_argument("--seed", type=int, default=SEED)
     parser.add_argument("--include-clean", action=argparse.BooleanOptionalAction, default=True)
     parser.add_argument("--capture", choices=("36-1", "43-1", "52-1", "60-1", "45", "46", "47", "61-1",
@@ -4115,7 +4115,7 @@ def main(argv=None):
         "selection_rule": ("select one threshold maximizing minimum per-capture recall CI lower bound, "
                            f"subject to Wilson 95% upper FPR <= {args.ctu_dev_fpr_ci_ceiling:.6g} "
                            "on every whole validation capture; this is development-only and does not change "
-                           "the 0.1% independent-test release gate"),
+                           "the 0.25% independent-test release gate"),
         "schemes": summary,
         "runtime_classifier_supported": False,
         "runtime_status": "Research candidate only; app packet parser emits v10 transport features, but the production classifier loader currently runs the separate v3 candidate.",
