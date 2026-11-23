@@ -43,6 +43,29 @@ def _run(args: list[str], timeout: int = 15) -> subprocess.CompletedProcess:
                           check=False)
 
 
+_LAB_COMPONENT_PATTERN = re.compile(r"^\s*(\d+)\s+.*?(vEthernet \(IG-Lab\)|IG-Attacker|IG-Victim)\s*$", re.MULTILINE)
+
+
+def lab_component_args(list_text: str) -> list[str]:
+    """Pktmon component ids of the lab switch port and the lab VMs, parsed from `pktmon list`.
+
+    Traffic between lab VMs crosses the internal switch and may not reach the physical
+    NIC, so the lab components are captured in addition to "nics". Returns [] if none found.
+    """
+    args: list[str] = []
+    for match in _LAB_COMPONENT_PATTERN.finditer(list_text):
+        args += ["--comp", match.group(1)]
+    return args
+
+
+def _current_lab_component_args() -> list[str]:
+    try:
+        listed = _run(["list"], timeout=15)
+    except (OSError, subprocess.SubprocessError):
+        return []
+    return lab_component_args((listed.stdout or "") + "\n" + (listed.stderr or ""))
+
+
 def _is_not_running(status_text: str) -> bool:
     value = status_text.casefold()
     return any(marker in value for marker in (
@@ -246,7 +269,8 @@ def capture_header_segment(duration_seconds: int = 10) -> dict:
             except (OSError, ValueError, ImportError):
                 return {"status": "capture_owner_metadata_error",
                         "reason": "Не удалось сохранить владельца Pktmon-сессии; захват не запущен."}
-            start = _run(["start", "--capture", "--comp", "nics", "--pkt-size", "64",
+            lab_args = _current_lab_component_args()
+            start = _run(["start", "--capture", "--comp", "nics", *lab_args, "--pkt-size", "64",
                           "--flags", "0x012", "--file-name", str(etl_path),
                           "--file-size", str(_ETL_LIMIT_MB), "--log-mode", "circular"])
             if start.returncode != 0:
