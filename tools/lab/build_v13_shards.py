@@ -18,13 +18,21 @@ sys.path.insert(0, str(ROOT))
 from integrityguard.stream_ingest import ingest_capture  # noqa: E402
 
 V12 = ROOT / "outputs" / "lab" / "shards_v12"
+import argparse
 OUT = ROOT / "outputs" / "lab" / "shards_v13"
 SKIP = {"v12-benign-14"}
 SPECIAL = {"v12-benign-14b": ("outputs/lab/session/benign-14.pcapng",
                               "outputs/lab/session/benign14-rules-v2.json")}
 
 
-def main() -> int:
+def main(argv=None) -> int:
+    global OUT
+    parser = argparse.ArgumentParser()
+    parser.add_argument('--out', type=Path, default=OUT)
+    parser.add_argument('--dedupe-same-timestamp', action='store_true')
+    args = parser.parse_args(argv)
+    OUT = args.out
+    dedupe = args.dedupe_same_timestamp
     jobs = []
     for manifest_path in sorted(V12.glob("*.manifest.json")):
         sid = manifest_path.name.replace(".manifest.json", "")
@@ -42,7 +50,7 @@ def main() -> int:
             source=str(ROOT / source) if not Path(source).is_absolute() else source,
             source_id=new_id, role="dev", label_rule_path=ROOT / rule.replace("\\", "/"),
             out_dir=OUT, metadata={"scenario": new_id.replace("v13-", "")},
-            feature_version=13)
+            feature_version=13, dedupe_same_timestamp=dedupe)
         print(json.dumps({"source_id": new_id, "counts": {k: manifest["counts"][k] for k in ("attack", "benign")}}), flush=True)
     return 0
 

@@ -298,6 +298,25 @@ def source_mac_and_ip(frame: bytes, linktype: int):
     return frame[6:12].hex(":"), str(src)
 
 
+def dedupe_same_timestamp_frames(packets, counter: dict):
+    """Drop frames whose bytes repeat within the same timestamp group.
+
+    Lab captures taken with pktmon --comp all record one frame once per component, so
+    copies share the exact timestamp and bytes. Real packets rarely repeat at the same
+    microsecond; counts are kept in ``counter['dropped']``.
+    """
+    group_ts, group = None, set()
+    for packet in packets:
+        if packet[0] != group_ts:
+            group_ts, group = packet[0], set()
+        digest = hashlib.sha1(packet[2]).digest()
+        if digest in group:
+            counter["dropped"] += 1
+            continue
+        group.add(digest)
+        yield packet
+
+
 def iter_windows(packets, window_seconds: float = DEFAULT_WINDOW_SECONDS, on_packet=None):
     """Split a packet iterator into consecutive live-sensor-like windows.
 
@@ -442,7 +461,7 @@ def ingest_capture(*, source: str, source_id: str, role: str, label_rule_path: P
                    expected_sha256: str | None = None, expected_md5: str | None = None,
                    window_seconds: float = DEFAULT_WINDOW_SECONDS,
                    max_bytes: int | None = None, metadata: dict | None = None,
-                   feature_version: int = 10) -> dict:
+                   feature_version: int = 10, dedupe_same_timestamp: bool = False) -> dict:
     """Stream one capture into ``<out_dir>/<source_id>.npz`` plus a manifest.
 
     Returns the manifest. The shard is written only after the whole source was
@@ -477,6 +496,7 @@ def ingest_capture(*, source: str, source_id: str, role: str, label_rule_path: P
     started = datetime.now(timezone.utc)
     opened = open_capture_source(source, zip_member=zip_member, max_bytes=max_bytes)
     features, labels, windows, first_seen = [], [], [], []
+    dedupe_counter = {"dropped": 0}
     counts = {"packets": 0, "parsed": 0, "non_ip_frames": 0, "unsupported_or_truncated": 0,
               "windows": 0, "windows_flow_limit_reached": 0, "windows_with_errors": 0,
               "flows_total": 0, "flows_incomplete_excluded": 0, "flows_feature_error": 0,
@@ -491,7 +511,10 @@ def ingest_capture(*, source: str, source_id: str, role: str, label_rule_path: P
 
     status, reason = "ok", None
     try:
-        for index, _end, result in iter_windows(iter_stream_packets(opened.stream), window_seconds,
+        packets = iter_stream_packets(opened.stream)
+        if dedupe_same_timestamp:
+            packets = dedupe_same_timestamp_frames(packets, dedupe_counter)
+        for index, _end, result in iter_windows(packets, window_seconds,
                                                 on_packet=observe if rule.uses_mac else None):
             counts["windows"] += 1
             for key in ("packets", "parsed", "non_ip_frames", "unsupported_or_truncated"):
@@ -562,6 +585,8 @@ def ingest_capture(*, source: str, source_id: str, role: str, label_rule_path: P
         "adapter": {
             "name": "pcap_stream_live_windows",
             "window_seconds": window_seconds,
+            "dedupe_same_timestamp": bool(dedupe_same_timestamp),
+            "duplicate_frames_dropped": dedupe_counter["dropped"],
             "idle_timeout_seconds": npf._IDLE_TIMEOUT_SECONDS,
             "completion_rules": ("tcp SYN then FIN/RST; tcp half-open (originator sent only SYN) "
                                  "idle; udp idle; icmp idle - as network_packet_flows"),

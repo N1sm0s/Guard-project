@@ -40,6 +40,8 @@ def main(argv=None) -> int:
     parser.add_argument("--meta", nargs="*", default=[], help="key=value facts (os, family, attack type)")
     parser.add_argument("--feature-version", type=int, choices=(10, 11, 12, 13), default=10,
                         help="10: flow features (default); 11: plus 10-second host context; 12: plus same-service repetition; 13: plus packet-size statistics")
+    parser.add_argument("--dedupe-same-timestamp", action="store_true",
+                        help="drop frames repeated with identical timestamp and bytes (pktmon --comp all copies)")
     args = parser.parse_args(argv)
     meta = {}
     for item in args.meta:
@@ -53,7 +55,8 @@ def main(argv=None) -> int:
             label_rule_path=args.label_rule, out_dir=args.out_dir, zip_member=args.zip_member,
             expected_sha256=args.expected_sha256, expected_md5=args.expected_md5,
             window_seconds=args.window_seconds, max_bytes=args.max_bytes, metadata=meta,
-            feature_version=args.feature_version)
+            feature_version=args.feature_version,
+            dedupe_same_timestamp=args.dedupe_same_timestamp)
     except IngestError as error:
         print(f"ERROR: {error}", file=sys.stderr)
         return 2
