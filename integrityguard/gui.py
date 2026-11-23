@@ -1500,6 +1500,9 @@ class MainWindow(QMainWindow):
         self.actions.setTextFormat(Qt.RichText)
         two = QHBoxLayout()
         two.setSpacing(14)
+        lv_caption = label("Вероятность нарушения на каждом уровне: чем выше, тем вероятнее нарушение. "
+                           "0% — признаков нарушения на уровне не найдено.", muted=True, wrap=True)
+        lv.addWidget(lv_caption, len(LEVELS), 0, 1, 3)
         lv_card = card(lv, title="Оценки по уровням целостности")
         lv_card.layout().addStretch(1)
         two.addWidget(lv_card, 1)
@@ -1535,14 +1538,16 @@ class MainWindow(QMainWindow):
         else:
             self.res_title.setText(f"Риск {rs} из 100")
             self.res_sub.setText(ev.get("threat_ru", ""))
-        self.pdf_btn.setEnabled(False)
+        self.pdf_btn.setEnabled(True)
+        self.pdf_btn.setToolTip("Сохранить отчёт о последней проверке в PDF")
         levels = ev.get("levels", {})
         for name, (bar, val) in self.level_bars.items():
             v = levels.get(name)
             bar.setValue(int(round(100 * v)) if v is not None else 0)
             val.setText(f"{v:.0%}" if v is not None else "\u2014")
             if v is not None:
-                color = "#1f9d63" if v >= 0.7 else "#d99a1c" if v >= 0.4 else "#e5484d"
+                # Значение — вероятность нарушения: высокое = красное (хуже), низкое = зелёное.
+                color = "#e5484d" if v >= 0.7 else "#d99a1c" if v >= 0.4 else "#1f9d63"
                 bar.setStyleSheet(f"QProgressBar::chunk {{ background: {color}; border-radius: 3px; }}")
         nn_result = ev.get("_nn_result", {})
         probs = nn_result.get("class_probabilities") or {}
