@@ -341,6 +341,14 @@ def aggregate_packets(packet_source, *, capture_end_timestamp: float | None = No
     except (TypeError, ValueError, OverflowError):
         for record in records:
             record["features_v11"] = None
+    try:
+        from .network_flow_schema_v12 import from_live_flows_v12
+        service_vectors = from_live_flows_v12(records)
+        for record, vector in zip(records, service_vectors):
+            record["features_v12"] = vector
+    except (TypeError, ValueError, OverflowError):
+        for record in records:
+            record["features_v12"] = None
     ip_candidates = counts["parsed"] + counts["unsupported_or_truncated"]
     coverage = counts["parsed"] / max(ip_candidates, 1)
     status = "ok" if counts["unsupported_or_truncated"] == 0 \

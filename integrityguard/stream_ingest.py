@@ -454,8 +454,11 @@ def ingest_capture(*, source: str, source_id: str, role: str, label_rule_path: P
     elif feature_version == 11:
         from . import network_flow_schema_v11 as v11
         feature_key, feature_names = "features_v11", list(v11.FEATURE_NAMES)
+    elif feature_version == 12:
+        from . import network_flow_schema_v12 as v12
+        feature_key, feature_names = "features_v12", list(v12.FEATURE_NAMES)
     else:
-        raise IngestError("feature_version must be 10 or 11")
+        raise IngestError("feature_version must be 10, 11 or 12")
     if role not in ALLOWED_ROLES:
         raise IngestError("Only train/dev shards are produced; independent tests use their "
                           "registered one-pass evaluators")
@@ -593,6 +596,9 @@ def load_shard(manifest_path: Path, *, expected_role: str = "train"):
     elif manifest.get("feature_version") == 11:
         from . import network_flow_schema_v11 as v11
         expected_names = list(v11.FEATURE_NAMES)
+    elif manifest.get("feature_version") == 12:
+        from . import network_flow_schema_v12 as v12
+        expected_names = list(v12.FEATURE_NAMES)
     else:
         raise IngestError("Unknown shard feature version")
     if manifest.get("feature_names") != expected_names:
