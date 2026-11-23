@@ -441,12 +441,21 @@ def ingest_capture(*, source: str, source_id: str, role: str, label_rule_path: P
                    out_dir: Path, zip_member: str | None = None,
                    expected_sha256: str | None = None, expected_md5: str | None = None,
                    window_seconds: float = DEFAULT_WINDOW_SECONDS,
-                   max_bytes: int | None = None, metadata: dict | None = None) -> dict:
+                   max_bytes: int | None = None, metadata: dict | None = None,
+                   feature_version: int = 10) -> dict:
     """Stream one capture into ``<out_dir>/<source_id>.npz`` plus a manifest.
 
     Returns the manifest. The shard is written only after the whole source was
     read and any expected checksum matched; otherwise nothing is kept.
+    ``feature_version`` 10 (default) or 11 (adds unlabeled 10-second host context).
     """
+    if feature_version == 10:
+        feature_key, feature_names = "features_v10", list(v10.FEATURE_NAMES)
+    elif feature_version == 11:
+        from . import network_flow_schema_v11 as v11
+        feature_key, feature_names = "features_v11", list(v11.FEATURE_NAMES)
+    else:
+        raise IngestError("feature_version must be 10 or 11")
     if role not in ALLOWED_ROLES:
         raise IngestError("Only train/dev shards are produced; independent tests use their "
                           "registered one-pass evaluators")
@@ -492,7 +501,7 @@ def ingest_capture(*, source: str, source_id: str, role: str, label_rule_path: P
                     by = counts["incomplete_by_protocol"]
                     by[flow["protocol"]] = by.get(flow["protocol"], 0) + 1
                     continue
-                if flow.get("features_v10") is None:
+                if flow.get(feature_key) is None:
                     counts["flows_feature_error"] += 1
                     continue
                 flow["originator_macs"] = ip_macs.get(flow["originator_ip"], ())
@@ -500,7 +509,7 @@ def ingest_capture(*, source: str, source_id: str, role: str, label_rule_path: P
                 if target is None:
                     counts["flows_label_excluded"] += 1
                     continue
-                features.append(flow["features_v10"]); labels.append(target)
+                features.append(flow[feature_key]); labels.append(target)
                 windows.append(index); first_seen.append(flow["first_seen"])
                 counts["attack" if target else "benign"] += 1
                 key = f"{flow['protocol']}:{'attack' if target else 'benign'}"
@@ -555,8 +564,8 @@ def ingest_capture(*, source: str, source_id: str, role: str, label_rule_path: P
             "parser_sha256": _sha256_path(Path(npf.__file__)),
             "ingest_sha256": _sha256_path(Path(__file__)),
         },
-        "feature_version": v10.FEATURE_VERSION,
-        "feature_names": list(v10.FEATURE_NAMES),
+        "feature_version": feature_version,
+        "feature_names": feature_names,
         "label_rule": {"path": str(rule_path), "sha256": _sha256_path(rule_path),
                        "spec": rule.spec},
         "metadata": metadata or {},
@@ -579,14 +588,20 @@ def load_shard(manifest_path: Path, *, expected_role: str = "train"):
         raise IngestError("Unknown shard format")
     if manifest.get("role") != expected_role:
         raise IngestError(f"Shard role {manifest.get('role')!r} is not {expected_role!r}")
-    if manifest.get("feature_version") != v10.FEATURE_VERSION \
-            or manifest.get("feature_names") != list(v10.FEATURE_NAMES):
-        raise IngestError("Shard feature contract differs from schema v10")
+    if manifest.get("feature_version") == 10:
+        expected_names = list(v10.FEATURE_NAMES)
+    elif manifest.get("feature_version") == 11:
+        from . import network_flow_schema_v11 as v11
+        expected_names = list(v11.FEATURE_NAMES)
+    else:
+        raise IngestError("Unknown shard feature version")
+    if manifest.get("feature_names") != expected_names:
+        raise IngestError("Shard feature contract differs from its declared version")
     shard_path = manifest_path.parent / manifest["shard"]["path"]
     if _sha256_path(shard_path) != manifest["shard"]["sha256"]:
         raise IngestError("Shard SHA-256 differs from its manifest")
     with np.load(shard_path) as data:
         x, y = data["x"], data["y"].astype(np.int64)
-    if x.shape != (len(y), len(v10.FEATURE_NAMES)):
+    if x.shape != (len(y), len(expected_names)):
         raise IngestError("Shard array shape is inconsistent")
     return x, y, manifest
