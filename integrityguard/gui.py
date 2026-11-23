@@ -1513,6 +1513,31 @@ class MainWindow(QMainWindow):
         p.lay.addWidget(self.result_card)
         p.lay.addLayout(two)
         p.lay.addWidget(card(self.actions, title="Рекомендуемые действия реагирования"))
+        # Подсказки по признакам: объяснения для ручной проверки, не вердикт
+        self.hints_lbl = label("", wrap=True)
+        self.hints_lbl.setTextFormat(Qt.RichText)
+        p.lay.addWidget(card(self.hints_lbl, title="Подсказки по признакам (не вердикт)"))
+        # Решение оператора: записывается в журнал аудита, блокировка трафика этим не выполняется
+        self.dec_btns = {}
+        dec_row = QHBoxLayout()
+        dec_row.setSpacing(10)
+        for key, text, tip in (
+            ("allow", "Допустить", "Записать решение «допустить» в журнал аудита"),
+            ("hold", "Оставить на проверке", "Записать решение «оставить на проверке»"),
+            ("block", "Отметить как блокировку", "Записывается решение оператора. Блокировка трафика этим не выполняется."),
+        ):
+            btn = QPushButton(text)
+            btn.setEnabled(False)
+            btn.setToolTip(tip)
+            btn.clicked.connect(lambda _=False, k=key: self._record_operator_decision(k))
+            self.dec_btns[key] = btn
+            dec_row.addWidget(btn)
+        dec_row.addStretch(1)
+        self.dec_status = label("Решение оператора станет доступно после проверки.", muted=True, wrap=True)
+        dec_col = QVBoxLayout()
+        dec_col.addLayout(dec_row)
+        dec_col.addWidget(self.dec_status)
+        p.lay.addWidget(card(dec_col, title="Решение оператора"))
         p.lay.addStretch(1)
         # Автоматически запустить анализ после инициализации страницы
         self._check_busy = False
@@ -1565,6 +1590,15 @@ class MainWindow(QMainWindow):
             actions_html += f"<br>{nn_result.get('summary', '')}"
         # Полная техническая формулировка доступна в подсказке, не на основном экране.
         self.actions.setToolTip(nn_result.get("summary", ""))
+        from .check_hints import ADVICE_NOTE, hints as _hints
+        found = _hints(ev.get("_hint_features"))
+        muted_note = f"<br><span style='color:#8a8f99'>{ADVICE_NOTE}</span>"
+        if found:
+            items = "".join(f"<li>{h['reason']} <span style='color:#8a8f99'>({h['feature']} = {h['value']})</span></li>"
+                            for h in found)
+            self.hints_lbl.setText(f"<ul>{items}</ul>{muted_note}")
+        else:
+            self.hints_lbl.setText(f"Явных признаков по правилам не найдено.{muted_note}")
         if verdict == "BLOCK":
             actions_html += "<br><br>\u26d4 <b>Рекомендуется заблокировать</b> данный сетевой снимок."
         elif verdict == "ALLOW":
@@ -1573,6 +1607,28 @@ class MainWindow(QMainWindow):
             actions_html += "<br><br>\u26a0\ufe0f <b>Рекомендуется ручная проверка</b> данного события."
         self.actions.setText(actions_html)
         self._last_ev = ev
+    def _record_operator_decision(self, key: str):
+        """Writes the operator's choice to the audit chain. It does not block or change traffic."""
+        import getpass
+        from .check_audit import append_check
+        event_id = getattr(self, "_current_event_id", None)
+        if not event_id:
+            return
+        names = {"allow": "допустить", "hold": "оставить на проверке", "block": "отметить как блокировку"}
+        try:
+            operator = getpass.getuser()
+        except Exception:  # noqa: BLE001 — a missing login name must not break the page
+            operator = "неизвестен"
+        try:
+            append_check(DATA / "audit" / "network_check_audit.jsonl", {
+                "kind": "operator_decision", "event_id": str(event_id),
+                "operator": operator, "decision": key,
+                "note": "решение записано; блокировка трафика этим не выполняется",
+            })
+            self.dec_status.setText(f"Записано: {names[key]} · оператор {operator}. Блокировка не выполнена.")
+        except OSError as error:
+            self.dec_status.setText(f"Решение не записано: {type(error).__name__}")
+
     def _set_badge(self, verdict):
         text, color = VERDICT.get(verdict, ("—", "#2a2f3a"))
         self.badge.setText(text)
@@ -1686,6 +1742,7 @@ class MainWindow(QMainWindow):
                     "behavioral": behavioral_score,
                 },
                 "_nn_result": result,
+                "_hint_features": features,
             }
 
         def on_audit(res_ev):
@@ -1706,6 +1763,9 @@ class MainWindow(QMainWindow):
 
         def on_done(ev):
             self._check_last_event_id = event_id
+            self._current_event_id = event_id
+            for btn in self.dec_btns.values():
+                btn.setEnabled(True)
             self._check_progress_bar.setValue(100)
             verdict = ev.get("verdict", "REVIEW")
             rs = ev.get("risk_score", 0)
@@ -1717,6 +1777,7 @@ class MainWindow(QMainWindow):
                 from .check_audit import append_check
                 nn = ev.get("_nn_result") or {}
                 append_check(DATA / "audit" / "network_check_audit.jsonl", {
+                    "kind": "check",
                     "event_id": str(event_id),
                     "classifier_status": "scored" if nn.get("class_probabilities") else "abstained",
                     "classifier_decision": nn.get("decision"),
