@@ -38,8 +38,8 @@ def main(argv=None) -> int:
     parser.add_argument("--window-seconds", type=float, default=DEFAULT_WINDOW_SECONDS)
     parser.add_argument("--max-bytes", type=int, default=None)
     parser.add_argument("--meta", nargs="*", default=[], help="key=value facts (os, family, attack type)")
-    parser.add_argument("--feature-version", type=int, choices=(10, 11, 12), default=10,
-                        help="10: flow features (default); 11: plus 10-second host context; 12: plus same-service repetition")
+    parser.add_argument("--feature-version", type=int, choices=(10, 11, 12, 13), default=10,
+                        help="10: flow features (default); 11: plus 10-second host context; 12: plus same-service repetition; 13: plus packet-size statistics")
     args = parser.parse_args(argv)
     meta = {}
     for item in args.meta:

@@ -17,6 +17,7 @@ from .network_flow_schema_v11 import from_live_flows as from_live_flows_v11
 _MAX_CAPTURE_BYTES = 128 * 1024 * 1024
 _MAX_FLOWS = 250_000
 _UDP_IDLE_TIMEOUT_SECONDS = 1.0
+_SMALL_PACKET_BYTES = 64  # IP length at or below this counts as a small packet (v13)
 # ICMP has no close handshake and a SYN-flood flow never sends FIN/RST, so the
 # same verified-idle rule as UDP is used to close them inside a segment.
 _IDLE_TIMEOUT_SECONDS = _UDP_IDLE_TIMEOUT_SECONDS
@@ -268,7 +269,9 @@ def aggregate_packets(packet_source, *, capture_end_timestamp: float | None = No
                         "responder_ip": destination[0], "saw_syn": False,
                         "saw_syn_ack": False, "saw_ack": False,
                         "saw_fin": False, "saw_rst": False,
-                        "saw_fin_or_rst": False, "originator_non_syn_packets": 0}
+                        "saw_fin_or_rst": False, "originator_non_syn_packets": 0,
+                        "pkt_size_sum": 0, "pkt_size_sumsq": 0,
+                        "pkt_size_min": None, "pkt_size_max": 0, "small_packets": 0}
                 flows[key] = flow
             direction = "a" if source == endpoint_a else "b"
             if (source == (flow["originator_ip"], flow["originator_port"])
@@ -277,6 +280,11 @@ def aggregate_packets(packet_source, *, capture_end_timestamp: float | None = No
             flow["total_packets"] += 1
             flow["total_bytes"] += ip_bytes
             flow[f"direction_{direction}_bytes"] += ip_bytes
+            flow["pkt_size_sum"] += ip_bytes
+            flow["pkt_size_sumsq"] += ip_bytes * ip_bytes
+            flow["pkt_size_min"] = ip_bytes if flow["pkt_size_min"] is None else min(flow["pkt_size_min"], ip_bytes)
+            flow["pkt_size_max"] = max(flow["pkt_size_max"], ip_bytes)
+            flow["small_packets"] += int(ip_bytes <= _SMALL_PACKET_BYTES)
             flow["first_seen"] = min(flow["first_seen"], timestamp)
             flow["last_seen"] = max(flow["last_seen"], timestamp)
             if protocol == "tcp":
@@ -324,6 +332,9 @@ def aggregate_packets(packet_source, *, capture_end_timestamp: float | None = No
             "saw_rst": flow["saw_rst"],
             "protocol": flow["protocol"], "complete": complete,
             "completion_reason": completion_reason,
+            "pkt_size_sum": flow["pkt_size_sum"], "pkt_size_sumsq": flow["pkt_size_sumsq"],
+            "pkt_size_min": flow["pkt_size_min"], "pkt_size_max": flow["pkt_size_max"],
+            "small_packets": flow["small_packets"],
         }
         try:
             record["features"] = from_live_flow(record)
@@ -349,6 +360,14 @@ def aggregate_packets(packet_source, *, capture_end_timestamp: float | None = No
     except (TypeError, ValueError, OverflowError):
         for record in records:
             record["features_v12"] = None
+    try:
+        from .network_flow_schema_v13 import from_live_flows_v13
+        size_vectors = from_live_flows_v13(records)
+        for record, vector in zip(records, size_vectors):
+            record["features_v13"] = vector
+    except (TypeError, ValueError, OverflowError):
+        for record in records:
+            record["features_v13"] = None
     ip_candidates = counts["parsed"] + counts["unsupported_or_truncated"]
     coverage = counts["parsed"] / max(ip_candidates, 1)
     status = "ok" if counts["unsupported_or_truncated"] == 0 \
