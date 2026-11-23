@@ -38,6 +38,8 @@ def main(argv=None) -> int:
     parser.add_argument("--window-seconds", type=float, default=DEFAULT_WINDOW_SECONDS)
     parser.add_argument("--max-bytes", type=int, default=None)
     parser.add_argument("--meta", nargs="*", default=[], help="key=value facts (os, family, attack type)")
+    parser.add_argument("--feature-version", type=int, choices=(10, 11), default=10,
+                        help="10: flow features (default); 11: plus unlabeled 10-second host context")
     args = parser.parse_args(argv)
     meta = {}
     for item in args.meta:
@@ -50,7 +52,8 @@ def main(argv=None) -> int:
             source=args.source, source_id=args.source_id, role=args.role,
             label_rule_path=args.label_rule, out_dir=args.out_dir, zip_member=args.zip_member,
             expected_sha256=args.expected_sha256, expected_md5=args.expected_md5,
-            window_seconds=args.window_seconds, max_bytes=args.max_bytes, metadata=meta)
+            window_seconds=args.window_seconds, max_bytes=args.max_bytes, metadata=meta,
+            feature_version=args.feature_version)
     except IngestError as error:
         print(f"ERROR: {error}", file=sys.stderr)
         return 2
