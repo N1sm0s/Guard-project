@@ -3,9 +3,9 @@
 $ErrorActionPreference = "Continue"
 $root = "F:\New\integrityguard"
 $log = Join-Path $root "outputs\lab\swap-app-elevated.txt"
-$staged = Join-Path $root "build\staging-dist-20261123f\IntegrityGuard"
+$staged = Join-Path $root "build\staging-dist-20261123h\IntegrityGuard"
 $installed = Join-Path $root "dist\IntegrityGuard"
-$backup = Join-Path $root "dist\IntegrityGuard-backup-20261123f"
+$backup = Join-Path $root "dist\IntegrityGuard-backup-20261123h"
 
 function Log($text) { $text | Out-File -FilePath $log -Append -Encoding utf8 }
 Remove-Item $log -ErrorAction SilentlyContinue
