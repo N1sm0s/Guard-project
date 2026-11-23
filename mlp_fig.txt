@@ -1,5 +1,0 @@
-﻿figures written
-01_class_distribution.png 30934 bytes
-02_per_class_detected.png 40791 bytes
-02_confusion_matrix.png 36223 bytes
-04_model_evaluation.png 109875 bytes
