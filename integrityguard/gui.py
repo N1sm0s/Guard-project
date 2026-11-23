@@ -1500,8 +1500,9 @@ class MainWindow(QMainWindow):
         self.actions.setTextFormat(Qt.RichText)
         two = QHBoxLayout()
         two.setSpacing(14)
-        lv_caption = label("Вероятность нарушения на каждом уровне: чем выше, тем вероятнее нарушение. "
-                           "0% — признаков нарушения на уровне не найдено.", muted=True, wrap=True)
+        lv_caption = label("Эвристическая оценка по признакам снимка, не вероятность атаки: "
+                           "чем выше значение, тем ближе к норме. Низкое значение — повод проверить вручную.",
+                           muted=True, wrap=True)
         lv.addWidget(lv_caption, len(LEVELS), 0, 1, 3)
         lv_card = card(lv, title="Оценки по уровням целостности")
         lv_card.layout().addStretch(1)
@@ -1546,8 +1547,8 @@ class MainWindow(QMainWindow):
             bar.setValue(int(round(100 * v)) if v is not None else 0)
             val.setText(f"{v:.0%}" if v is not None else "\u2014")
             if v is not None:
-                # Значение — вероятность нарушения: высокое = красное (хуже), низкое = зелёное.
-                color = "#e5484d" if v >= 0.7 else "#d99a1c" if v >= 0.4 else "#1f9d63"
+                # Эвристическая оценка по признакам снимка: высокое = ближе к норме (зелёный).
+                color = "#1f9d63" if v >= 0.7 else "#d99a1c" if v >= 0.4 else "#e5484d"
                 bar.setStyleSheet(f"QProgressBar::chunk {{ background: {color}; border-radius: 3px; }}")
         nn_result = ev.get("_nn_result", {})
         probs = nn_result.get("class_probabilities") or {}
@@ -1711,6 +1712,20 @@ class MainWindow(QMainWindow):
             risk_text = f"риск {rs} из 100" if rs is not None else "оценка риска не рассчитана"
             self._check_status_lbl.setText(f"\u2705 Анализ завершён · {risk_text}")
             self._show_event_nn(ev)
+            # Каждая проверка пишется в цепочку аудита: что показано и воздержался ли классификатор.
+            try:
+                from .check_audit import append_check
+                nn = ev.get("_nn_result") or {}
+                append_check(DATA / "audit" / "network_check_audit.jsonl", {
+                    "event_id": str(event_id),
+                    "classifier_status": "scored" if nn.get("class_probabilities") else "abstained",
+                    "classifier_decision": nn.get("decision"),
+                    "verdict_shown": ev.get("verdict"),
+                    "risk_score": ev.get("risk_score"),
+                    "levels": ev.get("levels"),
+                })
+            except OSError as error:
+                self._check_status_lbl.setText(f"Аудит не записан: {type(error).__name__}")
             QTimer.singleShot(4000, lambda: self._check_progress_card.setVisible(False))
 
         worker = self.run_bg(job, lambda ev: on_done(on_audit(ev)), self.check_btn)
