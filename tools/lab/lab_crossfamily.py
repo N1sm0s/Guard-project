@@ -25,9 +25,9 @@ import loco_ctu13_diagnostic as loco  # noqa: E402
 
 SHARDS = ROOT / "outputs" / "lab" / "shards"
 FAMILIES = {
-    "flood": ["sess-udp-03", "seg-68b743878383", "seg-96dc621453ef", "real-flood-02"],
-    "scan": ["real-scan-01", "real-scan-02", "real-scan-03"],
-    "ssh": ["real-ssh-01"],
+    "flood": ["sess-udp-03", "seg-68b743878383", "seg-96dc621453ef", "real-flood-02", "real-flood-03"],
+    "scan": ["real-scan-01", "real-scan-02", "real-scan-03", "real-scan-04"],
+    "ssh": ["real-ssh-01", "real-ssh-02"],
 }
 TEST_BENIGN = "sess-benign-08"
 
