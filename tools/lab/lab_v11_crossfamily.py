@@ -32,7 +32,7 @@ FAMILIES = {
 }
 TRAIN_BACKGROUND = ["v11-benign-06", "v11-benign-07", "v11-benign-09"]
 CALIBRATION = ["v11-benign-10", "v11-benign-11"]
-CHECK = ["v11-benign-08"]
+CHECK = ["v11-benign-08", "v11-benign-12"]
 VOLUME_DROP = {0, 1, 2, 3, 8, 9, 12}
 
 
