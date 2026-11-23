@@ -269,8 +269,10 @@ def capture_header_segment(duration_seconds: int = 10) -> dict:
             except (OSError, ValueError, ImportError):
                 return {"status": "capture_owner_metadata_error",
                         "reason": "Не удалось сохранить владельца Pktmon-сессии; захват не запущен."}
-            lab_args = _current_lab_component_args()
-            start = _run(["start", "--capture", "--comp", "nics", *lab_args, "--pkt-size", "64",
+            # Traffic between lab VMs was seen in one direction only with the lab port alone;
+            # with lab components present the capture uses all components (verified 23.11.2026).
+            comp = "all" if _current_lab_component_args() else "nics"
+            start = _run(["start", "--capture", "--comp", comp, "--pkt-size", "64",
                           "--flags", "0x012", "--file-name", str(etl_path),
                           "--file-size", str(_ETL_LIMIT_MB), "--log-mode", "circular"])
             if start.returncode != 0:
