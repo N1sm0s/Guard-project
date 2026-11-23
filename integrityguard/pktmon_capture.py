@@ -58,12 +58,20 @@ def lab_component_args(list_text: str) -> list[str]:
     return args
 
 
+_LAST_LAB_DIAGNOSTIC: dict = {}
+
+
 def _current_lab_component_args() -> list[str]:
     try:
         listed = _run(["list"], timeout=15)
-    except (OSError, subprocess.SubprocessError):
+    except (OSError, subprocess.SubprocessError) as error:
+        _LAST_LAB_DIAGNOSTIC.update({"list_error": type(error).__name__})
         return []
-    return lab_component_args((listed.stdout or "") + "\n" + (listed.stderr or ""))
+    text = (listed.stdout or "") + "\n" + (listed.stderr or "")
+    args = lab_component_args(text)
+    _LAST_LAB_DIAGNOSTIC.update({"list_returncode": listed.returncode, "list_lines": len(text.splitlines()),
+                                 "lab_component_args": args})
+    return args
 
 
 def _is_not_running(status_text: str) -> bool:
@@ -324,6 +332,14 @@ def capture_header_segment(duration_seconds: int = 10) -> dict:
         result = aggregate_capture(pcapng_path, capture_end_timestamp=capture_end_timestamp)
         result["capture_sha256"] = capture_sha256
         result["segment_file"] = str(kept) if kept else None
+        result["lab_capture_diagnostic"] = dict(_LAST_LAB_DIAGNOSTIC)
+        if kept:
+            try:
+                kept.with_suffix(".diag.json").write_text(
+                    json.dumps({"capture_sha256": capture_sha256, **result["lab_capture_diagnostic"],
+                                "comp": comp}, ensure_ascii=False, indent=2), encoding="utf-8")
+            except OSError:
+                pass
         result["capture_interval_seconds"] = duration
         result["capture_scope"] = "NIC packet headers, first 64 bytes only; payload is not retained"
         result["capture_completeness"] = "best_effort; Pktmon drop counters not yet joined"
