@@ -17,6 +17,7 @@ import time
 from pathlib import Path
 
 from .network_packet_flows import aggregate_capture
+from .paths import DATA_ROOT
 
 _CAPTURE_SECONDS_MAX = 30
 _ETL_LIMIT_MB = 64
@@ -186,6 +187,21 @@ def _recover_stale_owned_capture(status_text: str) -> bool:
     return True
 
 
+def _keep_segment(pcapng_path: Path, sha256: str) -> Path:
+    """Keep the packet segment for later labelled ingestion. Named by its SHA-256; the copy is verified."""
+    target_dir = Path(DATA_ROOT) / "pktmon-segments"
+    target_dir.mkdir(parents=True, exist_ok=True)
+    target = target_dir / (sha256 + ".pcapng")
+    if not target.is_file():
+        temp = target.with_suffix(".pcapng.tmp")
+        shutil.copyfile(pcapng_path, temp)
+        if hashlib.sha256(temp.read_bytes()).hexdigest() != sha256:
+            temp.unlink(missing_ok=True)
+            raise OSError("Copy of the packet segment does not match its hash")
+        os.replace(temp, target)
+    return target
+
+
 def capture_header_segment(duration_seconds: int = 10) -> dict:
     """Capture one bounded segment. Never stops a Pktmon session it did not start."""
     if os.name != "nt":
@@ -275,8 +291,13 @@ def capture_header_segment(duration_seconds: int = 10) -> dict:
             return {"status": "pcapng_conversion_error",
                     "reason": (converted.stderr or converted.stdout or "Не удалось преобразовать ETL.").strip()[:400]}
         capture_sha256 = hashlib.sha256(pcapng_path.read_bytes()).hexdigest()
+        try:
+            kept = _keep_segment(pcapng_path, capture_sha256)
+        except OSError:
+            kept = None
         result = aggregate_capture(pcapng_path, capture_end_timestamp=capture_end_timestamp)
         result["capture_sha256"] = capture_sha256
+        result["segment_file"] = str(kept) if kept else None
         result["capture_interval_seconds"] = duration
         result["capture_scope"] = "NIC packet headers, first 64 bytes only; payload is not retained"
         result["capture_completeness"] = "best_effort; Pktmon drop counters not yet joined"
