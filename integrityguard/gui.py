@@ -1503,7 +1503,8 @@ class MainWindow(QMainWindow):
         lv_card = card(lv, title="Оценки по уровням целостности")
         lv_card.layout().addStretch(1)
         two.addWidget(lv_card, 1)
-        two.addWidget(card(self.suspects, title="Локализация"), 1)
+        self.loc_card = card(self.suspects, title="Локализация")
+        two.addWidget(self.loc_card, 1)
         self.result_card = card(head)
         p.lay.addWidget(self.result_card)
         p.lay.addLayout(two)
@@ -1522,15 +1523,18 @@ class MainWindow(QMainWindow):
         self._set_badge(ev.get("verdict"))
         rs = ev.get("risk_score")
         rs_color = "#8a8f99" if rs is None else "#e5484d" if rs >= 70 else "#d99a1c" if rs >= 30 else "#1f9d63"
-        self.risk_badge.setText("\u2014" if rs is None else str(rs))
+        self.risk_badge.setText("\u043d/\u0434" if rs is None else str(rs))
         self.risk_badge.setStyleSheet(
             f"background: {rs_color}22; color: {rs_color}; border: 2px solid {rs_color}; "
             f"border-radius: 9px; font-size: 14pt; font-weight: 700; padding: 4px 10px;")
         verdict = ev.get("verdict", "REVIEW")
-        decision_ru = {"ALLOW": "ДОПУСТИТЬ", "BLOCK": "ЗАБЛОКИРОВАТЬ", "REVIEW": "НА ПРОВЕРКУ"}.get(verdict, verdict)
-        risk_text = f"риск {rs}/100" if rs is not None else "оценка риска не рассчитана"
-        self.res_title.setText(f"Нейросеть: {decision_ru}  ({risk_text})")
-        self.res_sub.setText(ev.get("threat_ru", ""))
+        # Вердикт показан только крупной плашкой (badge); здесь — причина простым языком.
+        if rs is None:
+            self.res_title.setText("Оценка риска не рассчитана")
+            self.res_sub.setText("Классификатор не готов для текущей версии признаков. Проверьте событие вручную.")
+        else:
+            self.res_title.setText(f"Риск {rs} из 100")
+            self.res_sub.setText(ev.get("threat_ru", ""))
         self.pdf_btn.setEnabled(False)
         levels = ev.get("levels", {})
         for name, (bar, val) in self.level_bars.items():
@@ -1547,10 +1551,14 @@ class MainWindow(QMainWindow):
             probabilities_html = (f"<b>Вероятность угрозы:</b> {p_block:.1%} &nbsp;|&nbsp; "
                                   f"<b>Вероятность безопасности:</b> {p_allow:.1%}<br>")
         else:
-            probabilities_html = "<b>Вероятности классов:</b> не рассчитаны — нет подходящего обученного кандидата.<br>"
-        actions_html = (probabilities_html +
-                        f"<b>Предложение нейросети:</b> {nn_result.get('decision', '?')}<br>"
-                        f"{nn_result.get('summary', '')}")
+            probabilities_html = "<b>Вероятности:</b> не рассчитаны.<br>"
+        decision_word = {"ALLOW": "допустить", "BLOCK": "заблокировать",
+                         "REVIEW": "проверить вручную"}.get(nn_result.get("decision"), "проверить вручную")
+        actions_html = probabilities_html + f"<b>Предложение классификатора:</b> {decision_word}"
+        if probs:
+            actions_html += f"<br>{nn_result.get('summary', '')}"
+        # Полная техническая формулировка доступна в подсказке, не на основном экране.
+        self.actions.setToolTip(nn_result.get("summary", ""))
         if verdict == "BLOCK":
             actions_html += "<br><br>\u26d4 <b>Рекомендуется заблокировать</b> данный сетевой снимок."
         elif verdict == "ALLOW":
@@ -1695,9 +1703,8 @@ class MainWindow(QMainWindow):
             self._check_progress_bar.setValue(100)
             verdict = ev.get("verdict", "REVIEW")
             rs = ev.get("risk_score", 0)
-            decision_ru = {"ALLOW": "ДОПУСТИТЬ", "BLOCK": "ЗАБЛОКИРОВАТЬ", "REVIEW": "НА ПРОВЕРКУ"}.get(verdict, verdict)
-            risk_text = f"риск {rs}/100" if rs is not None else "нет подтверждённой оценки риска"
-            self._check_status_lbl.setText(f"\u2705 Анализ завершён: {decision_ru}  ({risk_text})")
+            risk_text = f"риск {rs} из 100" if rs is not None else "оценка риска не рассчитана"
+            self._check_status_lbl.setText(f"\u2705 Анализ завершён · {risk_text}")
             self._show_event_nn(ev)
             QTimer.singleShot(4000, lambda: self._check_progress_card.setVisible(False))
 
@@ -1787,6 +1794,9 @@ class MainWindow(QMainWindow):
                        if ev.get("analysis_mode") != "reference_missing"
                        else "Локализация недоступна без доверенного эталона.")
             self.suspects.setItem(0, 0, QTableWidgetItem(message))
+        if hasattr(self, "loc_card"):
+            # Пустую локализацию не показываем: блок появляется только при наличии данных.
+            self.loc_card.setVisible(bool(suspects) or ev.get("analysis_mode") == "reference_missing")
         acts = ev.get("actions", [])
         self.actions.setText("<br>".join(f"•&nbsp; {a}" for a in acts) if acts else
                              "<span style='color:#8a8f99'>Действия не требуются: пакет допущен.</span>")
