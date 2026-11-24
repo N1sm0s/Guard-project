@@ -13,17 +13,24 @@ from integrityguard import pktmon_segment as seg
 
 def _fake_run_factory(etl_bytes=b"ETL", counters='[{"name":"nic","value":1}]'):
     """Stand-in for pktmon.exe: writes the ETL file on start, a pcapng on etl2pcap."""
+    state = {"etl": None}  # active ETL path while a fake session runs, else None
+
     def fake_run(args, timeout=15):
         cmd = args[0]
         if cmd == "status":
-            return subprocess.CompletedProcess(args, 0, stdout="Pktmon is not running", stderr="")
+            if state["etl"] is None:
+                return subprocess.CompletedProcess(args, 0, stdout="Pktmon is not running", stderr="")
+            return subprocess.CompletedProcess(
+                args, 0, stdout=f"Pktmon is running\nFile name: {state['etl']}", stderr="")
         if cmd == "start":
             etl = Path(args[args.index("--file-name") + 1])
             etl.write_bytes(etl_bytes)
+            state["etl"] = str(etl)
             return subprocess.CompletedProcess(args, 0, stdout="ok", stderr="")
         if cmd == "counters":
             return subprocess.CompletedProcess(args, 0, stdout=counters, stderr="")
         if cmd == "stop":
+            state["etl"] = None
             return subprocess.CompletedProcess(args, 0, stdout="stopped", stderr="")
         if cmd == "etl2pcap":
             out = Path(args[args.index("--out") + 1])
