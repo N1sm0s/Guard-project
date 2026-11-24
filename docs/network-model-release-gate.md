@@ -967,3 +967,15 @@ Checkpoints `ctu13-v10-gate5-run*.pt` — только research-артефакт
 - Результат (fold «scan», полный вариант): полнота **0,9997** (порог 0,90 — выполнено); FPR на проверке **11,39%** (порог 1% — **не выполнено**); отдельно на фоне без односторонних UDP 0,83%.
 - Вывод: при сменённом пороге полнота сканирования достаточна, но ложные срабатывания на проверочном фоне остаются высокими. Причина та же, что раньше: калибровочный фон не переносится на фон проверки. Без свежего независимого фона критерий 1% не выполнить.
 - Гейт не пройден; модель не продвигается, блокировка не включена.
+
+## Host background advisory evaluation (24.11.2026, research-only)
+
+- Registration (written before the run): `outputs/lab/registrations/lab-host-advisory-registration-20261124.json`, script `tools/lab/lab_host_advisory_crossfamily.py` (sha256 `380b12ca13c69a7df8ff1d9c3408e327fa38a8959d04d6e277f9e89a1c2f40c9`). Criteria are copied unchanged from `lab-host-background-registration-20261124.json`: scope scan only, scan recall >= 0.90, check alarm rate <= 0.01, threshold = 99th percentile of calibration host background.
+- Split: calibration = host segments starting before 2026-11-24T02:00Z (109 shards, 4963 benign flows, all unlabelled); check = segments after that time (20 shards, 746 flows). Six segments were skipped because they produced no complete labelled flows. The lab subnet 172.20.0.0/24 is excluded.
+- Training is unchanged from the lab template: lab v13 attack shards plus lab v13 benign background. Host shards are used only for the threshold (calibration) and the alarm rate (check).
+- Result, scan fold, full 57 features: threshold from calibration 0.993832; AUC 0.9167; scan recall 0/6040 = 0.0000 (95% Wilson upper 0.0006).
+- Check alarm rate: overall 0/746 = 0.0000 (95% upper 0.0051); one-way UDP stratum 0/204; other stratum 0/542 = 0.0000 (95% upper 0.0070).
+- Criteria: scan recall >= 0.90 is **not met** (0.0000). Check alarm rate <= 0.01 is **met** (0.0000 overall and for the other stratum), but this pass says little: nothing was flagged, not only on background but also on scan traffic.
+- Out of scope, reported as limitations: flood fold recall 0.0256 (AUC 0.5071); SSH fold recall 0.0000 (AUC 0.0041).
+- Result file: `outputs/lab/results_host_advisory/lab_host_advisory_crossfamily_full.json` (not committed; outputs are git-ignored).
+- Caveats: host background is unlabelled normal host traffic, not confirmed benign, so the alarm rate is not a labelled FPR and is not comparable to the release gate FPR. The threshold came only from calibration shards (the 99th percentile on host calibration is about 0.99, far above the lab threshold of about 0.001 for the scan fold, so the threshold does not transfer to scan traffic). No blocking. No promotion.
