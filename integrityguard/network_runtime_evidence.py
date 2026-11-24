@@ -179,7 +179,8 @@ def record_captured_flows(path: str | Path, *, segment_hash: str,
             "labels": "unknown", "predictions_persisted": False}
 
 
-def recent_captured_flows(path: str | Path, *, limit: int = 200) -> dict:
+def recent_captured_flows(path: str | Path, *, limit: int = 200,
+                          verified_summary: dict | None = None) -> dict:
     """Read recent complete, unknown-label flows for live-chart reconstruction.
 
     This verifies the append-only runtime journals, links each row to a parsed
@@ -188,7 +189,9 @@ def recent_captured_flows(path: str | Path, *, limit: int = 200) -> dict:
     """
     if not isinstance(limit, int) or limit < 1 or limit > 2000:
         raise ValueError("Invalid recent-flow limit")
-    summary = runtime_summary(path)
+    # Callers that already verified the journal can pass that result and avoid
+    # scanning every append-only hash chain a second time.
+    summary = verified_summary if verified_summary is not None else runtime_summary(path)
     if (summary.get("integrity_valid") is not True
             or summary.get("capture_integrity_valid") is not True
             or summary.get("captured_flow_integrity_valid") is not True):

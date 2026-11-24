@@ -17,6 +17,7 @@ import shutil
 import subprocess
 import sys
 import tempfile
+import threading
 import time
 import uuid
 from pathlib import Path
@@ -29,6 +30,11 @@ MANIFEST = "manifest.json"
 PCAPNG = "segment.pcapng"
 COUNTERS = "counters.json"
 FORMAT = "integrityguard-pktmon-segment-v1"
+HELPER_PID_FILE = "helper.pid"
+
+# (wrapper Popen, pid-file path) for each UAC request this app started and has not reaped.
+_ACTIVE_HELPERS: list[tuple[subprocess.Popen, Path | None]] = []
+_HELPERS_LOCK = threading.Lock()
 
 
 class SegmentError(RuntimeError):
@@ -156,16 +162,71 @@ def request_elevated_capture(program: Path, script: Path | None, duration: int, 
                                                  "--out-dir", str(out_dir), "--root", str(root)]
     argline = " ".join('"' + part.replace('"', "") + '"' if (" " in part or not part.startswith("--")) else part
                        for part in parts)
+    # The elevated child's PID is written to a file so the app can end it on exit.
+    pid_file = Path(out_dir) / HELPER_PID_FILE
     script_text = (
-        "$p = Start-Process -FilePath $env:IG_FILE -Verb RunAs -Wait -PassThru -WindowStyle Hidden "
-        "-ArgumentList $env:IG_ARGS; exit $p.ExitCode"
+        "$p = Start-Process -FilePath $env:IG_FILE -Verb RunAs -PassThru -WindowStyle Hidden "
+        "-ArgumentList $env:IG_ARGS; Set-Content -LiteralPath $env:IG_PIDFILE -Value $p.Id; "
+        "$p.WaitForExit(); exit $p.ExitCode"
     )
-    env = dict(os.environ, IG_FILE=str(program), IG_ARGS=argline)
-    completed = subprocess.run(
+    env = dict(os.environ, IG_FILE=str(program), IG_ARGS=argline, IG_PIDFILE=str(pid_file))
+    proc = subprocess.Popen(
         ["powershell.exe", "-NoProfile", "-NonInteractive", "-Command", script_text],
-        capture_output=True, text=True, timeout=int(duration) + 300, env=env,
+        stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, env=env,
         creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
-    return completed.returncode
+    entry = (proc, pid_file)
+    with _HELPERS_LOCK:
+        _ACTIVE_HELPERS.append(entry)
+    try:
+        return proc.wait(timeout=int(duration) + 300)
+    except subprocess.TimeoutExpired:
+        _kill_tree(proc.pid)
+        raise
+    finally:
+        with _HELPERS_LOCK:
+            if entry in _ACTIVE_HELPERS:
+                _ACTIVE_HELPERS.remove(entry)
+
+
+def _kill_tree(pid: int) -> tuple[bool, str]:
+    """taskkill /T /F for one PID and its children. Returns (ok, note)."""
+    try:
+        done = subprocess.run(["taskkill", "/T", "/F", "/PID", str(pid)], capture_output=True,
+                              text=True, timeout=15, check=False,
+                              creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
+    except (OSError, subprocess.SubprocessError) as error:
+        return False, f"taskkill не запущен ({type(error).__name__})"
+    if done.returncode == 0:
+        return True, ""
+    return False, f"taskkill для PID {pid} не выполнен (код {done.returncode})"
+
+
+def stop_elevated_helper() -> list[str]:
+    """End the UAC wrapper and the elevated helper started by this app. Returns notes for failures.
+
+    The elevated child normally cannot be killed by a non-elevated app (access denied);
+    it is then reported, and its own 30 s capture bound and the owner-marker recovery
+    path are the remaining safety net.
+    """
+    with _HELPERS_LOCK:
+        entries = list(_ACTIVE_HELPERS)
+        _ACTIVE_HELPERS.clear()
+    notes: list[str] = []
+    for proc, pid_file in entries:
+        if proc.poll() is not None:
+            continue                      # already finished: its PIDs may be reused, do not touch them
+        ok, note = _kill_tree(proc.pid)
+        if not ok:
+            notes.append(note)
+        if pid_file is not None:
+            try:
+                child_pid = int(pid_file.read_text(encoding="ascii").strip())
+            except (OSError, ValueError):
+                continue
+            ok, note = _kill_tree(child_pid)
+            if not ok:
+                notes.append(note)
+    return notes
 
 
 def capture_via_helper(duration: int, root: Path, program: Path, script: Path | None,
@@ -177,6 +238,8 @@ def capture_via_helper(duration: int, root: Path, program: Path, script: Path | 
     """
     from .network_packet_flows import aggregate_capture
 
+    if pc.capture_stop_requested():
+        return {"status": "cancelled", "reason": "Приложение завершается; захват не запущен."}
     root = Path(root).resolve(strict=True)
     base = Path(out_base) if out_base else root / "pktmon-segments"
     base.mkdir(parents=True, exist_ok=True)

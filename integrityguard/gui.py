@@ -7,12 +7,13 @@ import hashlib
 import ipaddress
 import os
 import shutil
+import sqlite3
 import subprocess
 import sys
 import time
 import traceback
 import uuid
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from collections import deque
 from pathlib import Path
 
@@ -254,6 +255,7 @@ class Page(QScrollArea):
 # ---------------------------------------------------------------- главное окно
 class MainWindow(QMainWindow):
     def __init__(self):
+        startup_started = time.perf_counter()
         super().__init__()
         self.setWindowTitle("IntegrityGuard — контроль целостности нейросетевых программ")
         self.resize(1280, 820)
@@ -279,6 +281,7 @@ class MainWindow(QMainWindow):
         self._packet_capture_next = time.monotonic() + 15
         self._nn_monitor_flows = deque(maxlen=200)
         self._nn_monitor_status = "Ожидание первого захвата Pktmon."
+        self._auto_note_text = "Обновляется само при появлении новых событий."
 
         central = QWidget()
         root = QHBoxLayout(central)
@@ -310,13 +313,19 @@ class MainWindow(QMainWindow):
         self.banner.hide()
         self.banner_timer = QTimer(self, singleShot=True)
         self.banner_timer.timeout.connect(self.banner.hide)
-        pages = [("Проверка пакета", self._page_check()), ("Мониторинг", self._page_monitor()),
-                 ("Эталоны и версии", self._page_baselines()),
-                 ("Журнал событий", self._page_events()), ("Полнота обнаружения", self._page_recall()),
-                 ("Обучение и оценка", self._page_train()),
-                 ("Настройки", self._page_settings()),
-                 ("Нейросеть сети", self._page_nn())]
-        for i, (name, page) in enumerate(pages):
+        # Keep operational pages alive at startup (the incoming-package flow,
+        # settings state, and continuous network monitor depend on their widgets).
+        # Build analysis/history pages only when the user opens them.
+        self._page_factories = [self._page_check, self._page_monitor, self._page_baselines,
+                                self._page_events, self._page_recall, self._page_train,
+                                self._page_settings, self._page_nn]
+        self._page_loaded = set()
+        # The live monitor refreshes the event table even when its tab is not
+        # selected, so its widgets are also required from the start.
+        eager_pages = {0, 1, 3, 6, 7}
+        for i, name in enumerate(("Проверка пакета", "Мониторинг", "Эталоны и версии",
+                                  "Журнал событий", "Полнота обнаружения", "Обучение и оценка",
+                                  "Настройки", "Нейросеть сети")):
             if i in (0, 2, 4, 6, 7):
                 section_names = {0: "РАБОЧЕЕ МЕСТО", 2: "УПРАВЛЕНИЕ", 4: "КАЧЕСТВО МОДЕЛИ",
                                  6: "СИСТЕМА", 7: "НЕЙРОСЕТЬ"}
@@ -325,6 +334,7 @@ class MainWindow(QMainWindow):
             b.setCursor(Qt.PointingHandCursor)
             self.nav.addButton(b, i)
             sl.addWidget(b)
+            page = self._build_page(i) if i in eager_pages else QWidget()
             self.stack.addWidget(page)
         sl.addStretch(1)
         self.status = label("", "sub", wrap=True)
@@ -356,7 +366,7 @@ class MainWindow(QMainWindow):
         if self.auto_on():
             QTimer.singleShot(300, self._auto_start)
         else:
-            self.e_auto_note.setText("Автоматический режим выключен (включается в настройках).")
+            self._set_auto_note("Автоматический режим выключен (включается в настройках).")
         self._quitting = False
         self._setup_tray()
         # --- автоочистка устаревших обработанных пакетов во входящих (allow/review/block)
@@ -369,6 +379,8 @@ class MainWindow(QMainWindow):
         self.candidate_timer.timeout.connect(self._maybe_run_scheduled_candidate)
         self.candidate_timer.start(15 * 60_000)
         QTimer.singleShot(60_000, self._maybe_run_scheduled_candidate)
+        print(f"[startup] MainWindow initialized in {(time.perf_counter() - startup_started) * 1000:.0f} ms",
+              file=sys.stderr)
 
     # ------------------------------------------------------------ значок в трее (фоновая работа)
     def _setup_tray(self):
@@ -411,7 +423,10 @@ class MainWindow(QMainWindow):
 
     def _tray_quit(self):
         self._quitting = True
+        self._exit_cancelled = False
         self.close()
+        if self._exit_cancelled:                      # не закрываемся молча: сообщаем, почему выход отменён
+            self.notify("Выход отменён: фоновая задача продолжается.", "info")
 
     def notify(self, text, kind="error"):
         """Сообщение пользователю — полосой над страницей, без всплывающих окон."""
@@ -464,9 +479,23 @@ class MainWindow(QMainWindow):
     def _page_index(self, name):
         return [b.text() for b in self.nav.buttons()].index(name)
 
+    def _build_page(self, index):
+        started = time.perf_counter()
+        page = self._page_factories[index]()
+        self._page_loaded.add(index)
+        elapsed_ms = (time.perf_counter() - started) * 1000
+        if elapsed_ms >= 100:
+            print(f"[startup] page {index} built in {elapsed_ms:.0f} ms", file=sys.stderr)
+        return page
+
     def _auto_status(self, last=""):
-        self.e_auto_note.setText(f"Автоматический режим включён. Папка входящих пакетов: {self.incoming}"
-                               + (f"\n{last}" if last else ""))
+        self._set_auto_note(f"Автоматический режим включён. Папка входящих пакетов: {self.incoming}"
+                            + (f"\n{last}" if last else ""))
+
+    def _set_auto_note(self, text):
+        self._auto_note_text = text
+        if hasattr(self, "e_auto_note"):
+            self.e_auto_note.setText(text)
 
     def _auto_tick(self):
         """Наблюдение за папкой входящих: новый пакет проверяется, как только его копирование завершилось."""
@@ -720,6 +749,12 @@ class MainWindow(QMainWindow):
             return []
 
     def _goto(self, i):
+        if i not in self._page_loaded:
+            previous = self.stack.widget(i)
+            page = self._build_page(i)
+            self.stack.removeWidget(previous)
+            previous.deleteLater()
+            self.stack.insertWidget(i, page)
         self.stack.setCurrentIndex(i)
         name = self.nav.button(i).text()
         if name == "Мониторинг":
@@ -734,18 +769,49 @@ class MainWindow(QMainWindow):
     def closeEvent(self, e):
         # Закрытие окна крестиком и команда «Выход» в трее завершают приложение.
         # Не оставляем скрытый фоновый процесс после того, как пользователь закрыл окно.
-        busy = [w for w in self._workers if w.isRunning()]
-        if busy:
-            box = QMessageBox(QMessageBox.Question, "IntegrityGuard", "Идёт фоновая задача (проверка или обучение). "
-                              "Прервать её и закрыть программу?", QMessageBox.Yes | QMessageBox.No, self)
-            box.button(QMessageBox.Yes).setText("Прервать и закрыть")
-            box.button(QMessageBox.No).setText("Не закрывать")
-            if box.exec() != QMessageBox.Yes:
-                return e.ignore()
-        for w in busy:
-            w.terminate()
-            w.wait(2000)
+        if not self._confirm_exit_with_background_work():
+            self._exit_cancelled = True
+            return e.ignore()
+        self._exit_cancelled = False
+        self.shutdown_background()
         e.accept()
+
+    def _confirm_exit_with_background_work(self) -> bool:
+        if not any(w.isRunning() for w in self._workers):
+            return True
+        box = QMessageBox(QMessageBox.Question, "IntegrityGuard", "Идёт фоновая задача (проверка или обучение). "
+                          "Прервать её и закрыть программу?", QMessageBox.Yes | QMessageBox.No, self)
+        box.button(QMessageBox.Yes).setText("Прервать и закрыть")
+        box.button(QMessageBox.No).setText("Не закрывать")
+        return box.exec() == QMessageBox.Yes
+
+    def shutdown_background(self, grace_ms: int = 8000):
+        """Cancel background work and end this app's capture processes. Safe to call twice.
+
+        1. Set the capture stop flag; running captures stop their own Pktmon session.
+        2. Wait up to grace_ms for workers; terminate only those still running after that.
+        3. Stop a Pktmon session only if its owner marker names this process.
+        4. End the elevated helper tree started by this app (best effort; see stop_elevated_helper).
+        """
+        if getattr(self, "_shutdown_done", False):
+            return
+        self._shutdown_done = True
+        from .pktmon_capture import request_capture_stop, stop_own_capture_session
+        from .pktmon_segment import stop_elevated_helper
+        request_capture_stop()
+        busy = [w for w in self._workers if w.isRunning()]
+        deadline = time.monotonic() + grace_ms / 1000
+        for w in busy:
+            w.wait(max(0, int((deadline - time.monotonic()) * 1000)))
+        for w in busy:
+            if w.isRunning():
+                w.terminate()
+                w.wait(2000)
+        stopped, reason = stop_own_capture_session()
+        if not stopped:
+            print(time.strftime("%Y-%m-%d %H:%M:%S"), "выход:", reason, flush=True)
+        for note in stop_elevated_helper():
+            print(time.strftime("%Y-%m-%d %H:%M:%S"), "выход:", note, flush=True)
 
     def _read_events(self):
         f = Path(self.cfg("registry")) / "events.jsonl"
@@ -865,6 +931,48 @@ class MainWindow(QMainWindow):
             muted=True, wrap=True)
         self.net_capture_note.setTextInteractionFlags(Qt.TextSelectableByMouse)
         p.lay.addWidget(card(self.net_capture_note, title="Сбор сетевых наблюдений"))
+        self._network_baseline_path = DATA / "online" / "network_behavior_baseline.json"
+        from .network_behavior_baseline import load_profile
+        self._network_baseline_profile = load_profile(self._network_baseline_path)
+        now_utc = datetime.now(timezone.utc)
+        self.baseline_start = QLineEdit((now_utc - timedelta(minutes=20)).replace(
+            second=0, microsecond=0).isoformat(timespec="seconds"))
+        self.baseline_start.setPlaceholderText("Начало UTC: 2026-11-24T08:00:00+00:00")
+        self.baseline_end = QLineEdit(now_utc.replace(second=0, microsecond=0).isoformat(timespec="seconds"))
+        self.baseline_end.setPlaceholderText("Конец UTC: 2026-11-24T08:20:00+00:00")
+        self._baseline_window_auto = True
+        self.baseline_start.textEdited.connect(self._freeze_network_baseline_window)
+        self.baseline_end.textEdited.connect(self._freeze_network_baseline_window)
+        self.baseline_confirm = QCheckBox(
+            "Я выбрал этот интервал как локальную точку сравнения; безопасность трафика не подтверждена")
+        self.baseline_button = QPushButton("Сформировать профиль поведения")
+        self.baseline_button.setObjectName("primary")
+        self.baseline_button.clicked.connect(self._create_network_baseline)
+        self.baseline_status = label("", muted=True, wrap=True)
+        self.baseline_status.setTextInteractionFlags(Qt.TextSelectableByMouse)
+        self.baseline_progress = QProgressBar()
+        self.baseline_progress.setRange(0, 100)
+        self.baseline_progress.setValue(0)
+        self.baseline_progress.setFormat("Проверка журнала: %p%")
+        self.baseline_progress.setVisible(False)
+        self.baseline_readiness = QProgressBar()
+        self.baseline_readiness.setRange(0, 30)
+        self.baseline_readiness.setValue(0)
+        self.baseline_readiness.setFormat("%v / 30 записей в интервале · полнота не проверена")
+        self.baseline_readiness_note = label("", muted=True, wrap=True)
+        self.baseline_start.editingFinished.connect(self._refresh_network_baseline_readiness)
+        self.baseline_end.editingFinished.connect(self._refresh_network_baseline_readiness)
+        baseline_times = QHBoxLayout()
+        baseline_times.addWidget(label("Начало (UTC)", muted=True))
+        baseline_times.addWidget(self.baseline_start, 1)
+        baseline_times.addWidget(label("Конец (UTC)", muted=True))
+        baseline_times.addWidget(self.baseline_end, 1)
+        self._render_network_baseline_status()
+        p.lay.addWidget(card(baseline_times, self.baseline_confirm, self.baseline_button,
+                             self.baseline_readiness, self.baseline_readiness_note, self.baseline_progress,
+                             self.baseline_status,
+                             title="Эталон поведения этой сети · только справочные отклонения"))
+        self._refresh_network_baseline_readiness()
         self.net_flow_note = label(
             "Собственная модель анализирует текущие сокеты во время работы приложения. "
             "Проверка обновляется примерно раз в секунду. Модель формирует рекомендацию, не меняя Firewall.",
@@ -1307,15 +1415,27 @@ class MainWindow(QMainWindow):
             from .network_evidence import NetworkEventLog
             event_log = NetworkEventLog(DATA / "online" / "network_events.sqlite")
             event_id = event_log.capture(snapshot, source="gui_periodic")
+            baseline_advisory = None
+            from .network_behavior_baseline import compare_snapshot
+            profile = self._network_baseline_profile
+            if profile is not None:
+                try:
+                    baseline_advisory = compare_snapshot(snapshot, profile)
+                except ValueError as error:
+                    baseline_advisory = {"status": "unavailable", "reason": str(error)}
             try:
                 classifier = assess_network_with_classifier(
                     snapshot, {}, NETWORK_CLASSIFIER_CHECKPOINT)
             except Exception as error:  # noqa: BLE001 — model scoring cannot stop capture
                 classifier = {"status": "error", "reason": type(error).__name__}
-            return snapshot, event_id, classifier
+            return snapshot, event_id, classifier, baseline_advisory
 
         def done(result):
-            snapshot, event_id, classifier = result
+            snapshot, event_id, classifier, baseline_advisory = result
+            if self._baseline_window_auto:
+                end_utc = datetime.now(timezone.utc).replace(microsecond=0)
+                self.baseline_end.setText(end_utc.isoformat(timespec="seconds"))
+                self.baseline_start.setText((end_utc - timedelta(minutes=20)).isoformat(timespec="seconds"))
             note = (f"Снимок сохранён · {snapshot['observed_at_utc']} · "
                     f"активных соединений: {snapshot.get('active_connection_count', 0)} · "
                     f"удалённых узлов: {snapshot.get('remote_endpoint_count', 0)} · id {event_id}. ")
@@ -1325,7 +1445,23 @@ class MainWindow(QMainWindow):
                 note += (f"Собственная модель: {classifier.get('decision', 'REVIEW')}. "
                          f"{classifier.get('summary', 'Недостаточно данных для вывода.')} "
                          "Это рекомендация модели; Firewall не меняется.")
+            if baseline_advisory:
+                if baseline_advisory.get("status") == "unavailable":
+                    note += f" Профиль поведения не сравнен: {baseline_advisory['reason']}"
+                elif baseline_advisory.get("status") == "advisory_deviation":
+                    details = "; ".join(
+                        f"{item['feature']}: {item['value']:.2f} "
+                        f"(обычный диапазон {item['baseline_p05']:.2f}–{item['baseline_p95']:.2f})"
+                        for item in baseline_advisory["deviations"][:3])
+                    more = max(0, len(baseline_advisory["deviations"]) - 3)
+                    note += f" Отклонение от выбранного профиля: {details}"
+                    if more:
+                        note += f" и ещё {more}."
+                    note += " Только для обзора; это не метка и не решение модели."
+                else:
+                    note += " Параметры снимка в диапазонах выбранного профиля поведения. Это не подтверждение безопасности."
             self.net_capture_note.setText(note)
+            self._refresh_network_baseline_readiness()
             self._network_capture_busy = False
             self._check_nn()
 
@@ -1340,6 +1476,147 @@ class MainWindow(QMainWindow):
         self._workers.append(worker)
         worker.finished.connect(lambda: self._workers.remove(worker) if worker in self._workers else None)
         worker.start()
+
+    def _render_network_baseline_status(self):
+        profile = getattr(self, "_network_baseline_profile", None)
+        if not profile:
+            self.baseline_status.setText(
+                "Профиль не создан. Выберите фактический период журнала; минимум 30 снимков за 10 минут, "
+                "не менее 90% полных телеметрических записей, разрыв между полными снимками не более 120 секунд."
+            )
+            return
+        window = profile.get("window", {})
+        digest = profile.get("profile_sha256", "")
+        self.baseline_status.setText(
+            f"Профиль загружен · контрольная сумма совпадает · {profile.get('event_count', 0)} реальных снимков · "
+            f"полнота телеметрии {profile.get('telemetry_coverage', 0):.1%} · "
+            f"неполных исключено: {len(profile.get('excluded_events', []))} · "
+            f"{window.get('start_utc', '—')} — {window.get('end_utc', '—')} · "
+            f"SHA-256 {digest[:16]}… · это контрольная сумма, не удостоверение подлинности; "
+            "профиль не используется для меток, обучения или блокировки."
+        )
+
+    def _freeze_network_baseline_window(self):
+        """Stop rolling the suggested window as soon as the operator edits either time."""
+        self._baseline_window_auto = False
+        self.baseline_readiness_note.setText(
+            "Интервал задан вручную. Индикатор ниже показывает только предварительное число записей; "
+            "целостность и полнота проверяются при формировании профиля."
+        )
+
+    def _refresh_network_baseline_readiness(self):
+        """Show raw interval volume only; trust/completeness is checked on profile creation."""
+        try:
+            start = datetime.fromisoformat(self.baseline_start.text().strip().replace("Z", "+00:00"))
+            end = datetime.fromisoformat(self.baseline_end.text().strip().replace("Z", "+00:00"))
+            if start.tzinfo is None or end.tzinfo is None:
+                raise ValueError("Добавьте часовой пояс к обеим датам, например +00:00.")
+            start, end = start.astimezone(timezone.utc), end.astimezone(timezone.utc)
+            if end <= start:
+                raise ValueError("Конец интервала должен быть позже начала.")
+            db_path = DATA / "online" / "network_events.sqlite"
+            if not db_path.is_file():
+                count = 0
+            else:
+                with sqlite3.connect(f"file:{db_path.resolve().as_posix()}?mode=ro", uri=True,
+                                     timeout=1) as db:
+                    count = db.execute(
+                        "SELECT COUNT(*) FROM events WHERE captured_at_utc>=? AND captured_at_utc<=?",
+                        (start.isoformat(), end.isoformat())).fetchone()[0]
+            self.baseline_readiness.setValue(min(30, count))
+            duration = (end - start).total_seconds()
+            if duration < 600:
+                prefix = "Последние 20 минут сдвигаются автоматически до ручной правки дат. " if self._baseline_window_auto else ""
+                self.baseline_readiness_note.setText(
+                    f"{prefix}В журнале {count} записей по времени записи. Интервал короче минимальных 10 минут; "
+                    "состав и целостность снимков ещё не проверялись."
+                )
+            elif count < 30:
+                prefix = "Последние 20 минут сдвигаются автоматически до ручной правки дат. " if self._baseline_window_auto else ""
+                self.baseline_readiness_note.setText(
+                    f"{prefix}Пока {count} записей по времени записи; нужно минимум 30 полных снимков. "
+                    "Программа проверит хеши, полноту и разрывы только при формировании профиля."
+                )
+            else:
+                prefix = "Последние 20 минут сдвигаются автоматически до ручной правки дат. " if self._baseline_window_auto else ""
+                self.baseline_readiness_note.setText(
+                    f"{prefix}В интервале {count} записей по времени записи. Это предварительный счётчик: "
+                    "хеши, полнота телеметрии и разрывы проверяются при формировании профиля."
+                )
+        except (ValueError, OSError, sqlite3.Error) as error:
+            self.baseline_readiness.setValue(0)
+            self.baseline_readiness_note.setText(f"Не удалось оценить объём интервала: {error}")
+
+    def _create_network_baseline(self):
+        if not self.baseline_confirm.isChecked():
+            self.notify("Подтвердите репрезентативность выбранного периода. Это не присваивает метки безопасности.",
+                        "warn")
+            return
+        try:
+            from .network_behavior_baseline import build_profile, save_profile
+            start = datetime.fromisoformat(self.baseline_start.text().strip().replace("Z", "+00:00"))
+            end = datetime.fromisoformat(self.baseline_end.text().strip().replace("Z", "+00:00"))
+            if start.tzinfo is None or end.tzinfo is None:
+                raise ValueError("Укажите часовой пояс; например, +00:00 для UTC.")
+        except (ValueError, TypeError) as error:
+            self.notify(str(error), "error")
+            return
+        # Freeze precisely the interval the operator attested to before the worker
+        # starts; later live captures must not change the dates shown in the UI.
+        self._baseline_window_auto = False
+        self.baseline_start.setEnabled(False)
+        self.baseline_end.setEnabled(False)
+        self.baseline_confirm.setEnabled(False)
+        self.baseline_button.setEnabled(False)
+        self.baseline_progress.setValue(0)
+        self.baseline_progress.setVisible(True)
+        self.baseline_status.setText("Проверяю журнал снимков, целостность SHA-256 и покрытие интервала…")
+
+        def work(progress):
+            profile = build_profile(DATA / "online" / "network_events.sqlite", start, end,
+                                    operator_selected=True, progress=progress)
+            save_profile(profile, self._network_baseline_path)
+            return profile
+
+        def done(profile):
+            self._network_baseline_profile = profile
+            self._baseline_window_auto = False
+            self.baseline_confirm.setChecked(False)
+            self._render_network_baseline_status()
+            self.baseline_progress.setVisible(False)
+            self.baseline_start.setEnabled(True)
+            self.baseline_end.setEnabled(True)
+            self.baseline_confirm.setEnabled(True)
+            self.baseline_button.setEnabled(True)
+            self.notify("Профиль поведения сохранён отдельно. Он формирует только advisory-отклонения.", "ok")
+
+        def failed(message):
+            self.baseline_start.setEnabled(True)
+            self.baseline_end.setEnabled(True)
+            self.baseline_confirm.setEnabled(True)
+            self.baseline_button.setEnabled(True)
+            self.baseline_progress.setVisible(False)
+            self._render_network_baseline_status()
+            self.notify(f"Профиль не создан: {message}", "error")
+
+        worker = Worker(work, self)
+        worker.done.connect(done)
+        worker.fail.connect(failed)
+        worker.progress.connect(lambda value: self._network_baseline_progress(value))
+        worker.finished.connect(lambda: self.baseline_button.setEnabled(True))
+        self._workers.append(worker)
+        worker.finished.connect(lambda: self._workers.remove(worker) if worker in self._workers else None)
+        worker.start()
+
+    def _network_baseline_progress(self, value):
+        if not isinstance(value, dict):
+            return
+        percent = max(0, min(100, int(value.get("percent", 0))))
+        self.baseline_progress.setValue(percent)
+        self.baseline_status.setText(
+            f"Проверяю целостность записей журнала: "
+            f"{value.get('records_processed', 0)} из {value.get('records_total', 0)}…"
+        )
 
     def _change_network_block(self, action):
         try:
@@ -1416,8 +1693,8 @@ class MainWindow(QMainWindow):
 
     # ------------------------------------------------------------ страница «Проверка»
     def _page_check(self):
-        p = Page("Проверка пакета", "Сетевые снимки анализируются автоматически по мере поступления. "
-                                    "Кнопка ниже запускает повторную оценку последнего снимка; модельные предложения не применяют блокировку.")
+        p = Page("Проверка пакета", "Результат относится к последнему сетевому снимку. Прогноз модели — рекомендация, "
+                                    "а не подтверждённая метка и не действие блокировки.")
         # ---- строка статуса анализа + кнопка повтора ----
         self._check_status_lbl = label("Загружаем последнее событие из БД\u2026", muted=True, wrap=True)
         self.check_btn = QPushButton("\u27f3  Повторить оценку", objectName="primary")
@@ -1427,6 +1704,18 @@ class MainWindow(QMainWindow):
         status_row.addWidget(self._check_status_lbl, 1)
         status_row.addWidget(self.check_btn)
         p.lay.addWidget(card(status_row))
+
+        # Контекст проверяемого события остаётся видимым над вердиктом.
+        self.check_context_package = label("Ожидание события", "h2", wrap=True)
+        self.check_context_version = label("Версия: —", muted=True, wrap=True)
+        self.check_context_reference = label("Эталон: не определён", muted=True, wrap=True)
+        self.check_context_time = label("Время события: —", muted=True, wrap=True)
+        context = QGridLayout()
+        context.addWidget(self.check_context_package, 0, 0, 1, 2)
+        context.addWidget(self.check_context_version, 1, 0)
+        context.addWidget(self.check_context_reference, 1, 1)
+        context.addWidget(self.check_context_time, 2, 0, 1, 2)
+        p.lay.addWidget(card(context, title="Объект проверки"))
 
         # --- прогресс-бар и живой лог (скрыты до запуска проверки)
         self._check_progress_bar = QProgressBar()
@@ -1504,19 +1793,32 @@ class MainWindow(QMainWindow):
                            "чем выше значение, тем ближе к норме. Низкое значение — повод проверить вручную.",
                            muted=True, wrap=True)
         lv.addWidget(lv_caption, len(LEVELS), 0, 1, 3)
-        lv_card = card(lv, title="Оценки по уровням целостности")
+        lv_card = card(lv, title="Оценки признаков целостности")
         lv_card.layout().addStretch(1)
         two.addWidget(lv_card, 1)
-        self.loc_card = card(self.suspects, title="Локализация")
+        self.loc_card = card(self.suspects, title="Затронутые компоненты")
         two.addWidget(self.loc_card, 1)
         self.result_card = card(head)
         p.lay.addWidget(self.result_card)
-        p.lay.addLayout(two)
-        p.lay.addWidget(card(self.actions, title="Рекомендуемые действия реагирования"))
         # Подсказки по признакам: объяснения для ручной проверки, не вердикт
         self.hints_lbl = label("", wrap=True)
         self.hints_lbl.setTextFormat(Qt.RichText)
-        p.lay.addWidget(card(self.hints_lbl, title="Подсказки по признакам (не вердикт)"))
+        self.check_details_toggle = QPushButton("＋  Показать доказательства и технические детали")
+        self.check_details_toggle.setCheckable(True)
+        self.check_details = QWidget()
+        details_layout = QVBoxLayout(self.check_details)
+        details_layout.setContentsMargins(0, 0, 0, 0)
+        details_layout.addLayout(two)
+        details_layout.addWidget(card(self.hints_lbl, title="Подсказки по признакам (не вердикт)"))
+        self.check_details.setVisible(False)
+        self.check_details_toggle.toggled.connect(
+            lambda expanded: (self.check_details.setVisible(expanded),
+                              self.check_details_toggle.setText(
+                                  "−  Скрыть доказательства и технические детали" if expanded else
+                                  "＋  Показать доказательства и технические детали")))
+        p.lay.addWidget(self.check_details_toggle)
+        p.lay.addWidget(self.check_details)
+        p.lay.addWidget(card(self.actions, title="Рекомендуемое действие"))
         # Решение оператора: записывается в журнал аудита, блокировка трафика этим не выполняется
         self.dec_btns = {}
         dec_row = QHBoxLayout()
@@ -1549,6 +1851,7 @@ class MainWindow(QMainWindow):
 
     def _show_event_nn(self, ev):
         """Displays neural network analysis result on Package Check page."""
+        self._set_check_context(ev)
         self._set_badge(ev.get("verdict"))
         rs = ev.get("risk_score")
         rs_color = "#8a8f99" if rs is None else "#e5484d" if rs >= 70 else "#d99a1c" if rs >= 30 else "#1f9d63"
@@ -1627,7 +1930,7 @@ class MainWindow(QMainWindow):
             })
             self.dec_status.setText(f"Записано: {names[key]} · оператор {operator}. Блокировка не выполнена.")
         except OSError as error:
-            self.dec_status.setText(f"Решение не записано: {type(error).__name__}")
+            self.dec_status.setText(f"Решение не записано: {error}")
 
     def _set_badge(self, verdict):
         text, color = VERDICT.get(verdict, ("—", "#2a2f3a"))
@@ -1670,6 +1973,9 @@ class MainWindow(QMainWindow):
         if not force and event_id == self._check_last_event_id:
             return
         self._check_busy = True
+        self._current_event_id = None
+        for decision_button in self.dec_btns.values():
+            decision_button.setEnabled(False)
         self._check_inflight_event_id = event_id
         self._check_status_lbl.setText(f"\U0001f9e0 Анализируем событие {str(event_id)[:20]}\u2026")
 
@@ -1786,7 +2092,7 @@ class MainWindow(QMainWindow):
                     "levels": ev.get("levels"),
                 })
             except OSError as error:
-                self._check_status_lbl.setText(f"Аудит не записан: {type(error).__name__}")
+                self._check_status_lbl.setText(f"Аудит не записан: {error}")
             QTimer.singleShot(4000, lambda: self._check_progress_card.setVisible(False))
 
         worker = self.run_bg(job, lambda ev: on_done(on_audit(ev)), self.check_btn)
@@ -1819,6 +2125,7 @@ class MainWindow(QMainWindow):
 
 
     def _show_event(self, ev, external_refresh=False):
+        self._set_check_context(ev)
         self._set_badge(ev["verdict"])
         rs = ev.get("risk_score")
         if rs is None and isinstance(ev.get("score"), (int, float)):
@@ -1862,7 +2169,9 @@ class MainWindow(QMainWindow):
             v = ev.get("levels", {}).get(name)
             bar.setValue(int(round(100 * v)) if v is not None else 0)
             val.setText(f"{v:.2f}" if v is not None else "—")
-            color = "#e5484d" if (v or 0) >= 0.5 else "#2bb7ab"
+            # Для этой страницы высокий эвристический балл означает ближе к норме.
+            color = "#1f9d63" if v is not None and v >= 0.7 else (
+                "#d99a1c" if v is not None and v >= 0.4 else "#e5484d")
             bar.setStyleSheet(f"QProgressBar::chunk {{ background: {color}; border-radius: 4px; }}")
         self.suspects.setRowCount(0)
         suspects = ev.get("suspects") or []
@@ -1885,6 +2194,25 @@ class MainWindow(QMainWindow):
         if ev.get("verdict") == "BLOCK" and not external_refresh:
             self._auto_block_report(ev)
             self._notify_block(ev)
+
+    def _set_check_context(self, ev):
+        """Keep package identity and reference availability visible with the verdict."""
+        package = str(ev.get("package") or "Неизвестный пакет")
+        version = str(ev.get("version") or "не указана")
+        baseline = ev.get("baseline_version")
+        mode = ev.get("analysis_mode")
+        if mode == "reference_missing" or not baseline:
+            reference = "Эталон: отсутствует — сравнительная оценка не выполнена"
+        elif mode == "intake_validation_error":
+            reference = f"Эталон: {baseline} · проверка не завершена"
+        else:
+            reference = f"Эталон: {baseline}"
+        self.check_context_package.setText(package)
+        self.check_context_version.setText(f"Версия объекта: {version}")
+        self.check_context_reference.setText(reference)
+        self.check_context_reference.setStyleSheet(
+            "color: #d99a1c;" if "отсутствует" in reference or "не завершена" in reference else "")
+        self.check_context_time.setText(f"Время события: {_when(ev.get('time', ''))}")
 
     def _auto_block_report(self, ev):
         """При блокировке PDF-отчёт — готовая доказательная база для расследования — сохраняется сам,
@@ -2293,7 +2621,7 @@ class MainWindow(QMainWindow):
         self.e_detail.setMinimumHeight(220)
         self.e_path = label("", muted=True)
         self.e_path.setTextInteractionFlags(Qt.TextSelectableByMouse)
-        self.e_auto_note = label("Обновляется само при появлении новых событий.", muted=True)
+        self.e_auto_note = label(self._auto_note_text, muted=True)
         self.e_filter = QLineEdit(placeholderText="Фильтр по имени пакета…")
         self.e_filter.setClearButtonEnabled(True)
         self.e_filter.setMaximumWidth(260)
@@ -2731,17 +3059,32 @@ class MainWindow(QMainWindow):
         self.run_bg(job, done, self.candidate_rollback_btn)
 
     def _recover_release_if_needed(self):
-        try:
+        # Recovery verifies hashes and may read large checkpoints; keep it off the UI thread
+        # so a stale/interrupted release journal cannot make the window appear frozen.
+        def recover(_progress):
             from .release import recover_release
-            state = recover_release(DATA, self.cfg("model"))
-        except Exception as error:
-            self.notify(f"Не удалось проверить незавершённую операцию выпуска: {error}", "error")
-            return
-        if state and state.get("status") == "needs_review":
-            self.notify("После сбоя модель не совпала с ожидаемыми хешами выпуска. Выпуск остановлен; "
-                        "проверьте резервные копии и журнал релизов.", "error")
-        elif state and state.get("recovered_after_crash"):
-            self.notify(f"Восстановлено состояние операции выпуска: {state['status']}.", "info")
+            return recover_release(DATA, self.cfg("model"))
+
+        def recovered(result):
+            if isinstance(result, dict) and result.get("error"):
+                self.notify(f"Не удалось проверить незавершённую операцию выпуска: {result['error']}", "error")
+                return
+            state = result
+            if state and state.get("status") == "needs_review":
+                self.notify("После сбоя модель не совпала с ожидаемыми хешами выпуска. Выпуск остановлен; "
+                            "проверьте резервные копии и журнал релизов.", "error")
+            elif state and state.get("recovered_after_crash"):
+                self.notify(f"Восстановлено состояние операции выпуска: {state['status']}.", "info")
+
+        def failed(message):
+            self.notify(f"Не удалось проверить незавершённую операцию выпуска: {message}", "error")
+
+        worker = Worker(recover, self)
+        worker.done.connect(recovered)
+        worker.fail.connect(failed)
+        worker.finished.connect(lambda: self._workers.remove(worker) if worker in self._workers else None)
+        self._workers.append(worker)
+        worker.start()
 
     def _load_metrics(self):
         d = Path(self.cfg("model")).parent
@@ -2827,6 +3170,8 @@ class MainWindow(QMainWindow):
             p.lay.addStretch(1)
             return p
 
+        self._nn_candidate_sha256 = candidate.get("checkpoint_sha256")
+
         metrics = candidate.get("independent_test_metrics") or {}
         per_capture = candidate.get("per_capture_metrics") or {}
         test_counts = metrics.get("combined_counts") or {
@@ -2909,21 +3254,7 @@ class MainWindow(QMainWindow):
         self._nn_monitor_timer.timeout.connect(self._poll_nn_monitor_journal)
         self._nn_monitor_timer.start()
         self._nn_monitor_threshold = float(threshold)
-        if not self._nn_monitor_flows:
-            try:
-                from .network_runtime_evidence import recent_captured_flows
-                from .network_flow_model import assess_completed_packet_flows
-                recent = recent_captured_flows(DATA / "online" / "network_runtime_metrics.sqlite")
-                if recent.get("flows"):
-                    restored = assess_completed_packet_flows(
-                        recent["flows"], RESOURCE_ROOT / "models" / "network_flow_v3_candidate.pt")
-                    if restored.get("status") == "recommendation_candidate":
-                        self._nn_monitor_flows.extend(restored.get("flow_scores") or [])
-                        self._nn_monitor_status = (
-                            f"Восстановлены и заново оценены последние {len(self._nn_monitor_flows)} "
-                            "завершённых потоков из журнала; все локальные метки неизвестны.")
-            except (OSError, ValueError, TypeError):
-                pass
+        self._nn_monitor_status = "Проверяю целостность локального журнала Pktmon в фоне…"
         self._refresh_nn_monitor()
 
         train_ids = set(candidate.get("train_captures") or [])
@@ -2940,12 +3271,15 @@ class MainWindow(QMainWindow):
         )
         target_test_ready = hash_locked_target_evaluation(
             target_eval, candidate.get("checkpoint_sha256"))
-        try:
-            from .network_runtime_evidence import runtime_summary
-            runtime = runtime_summary(DATA / "online" / "network_runtime_metrics.sqlite")
-        except (OSError, ValueError, TypeError):
-            runtime = {"sample_count": 0, "p95_inference_ms": None,
-                       "target_load_tested": False, "drop_counters_observed": False}
+        # Full hash-chain walks are performed after the window appears.
+        runtime = {"sample_count": 0, "p95_inference_ms": None,
+                   "target_load_tested": False, "drop_counters_observed": False,
+                   "candidate_provenance_by_sha256": {},
+                   "candidate_linked_complete_flows_by_sha256": {},
+                   "candidate_linked_segment_counts_by_sha256": {},
+                   "capture_integrity_valid": False,
+                   "captured_flow_integrity_valid": False,
+                   "candidate_capture_link_integrity_valid": False}
         runtime_sample_count = int(runtime.get("sample_count", 0) or 0)
         active_checkpoint_hash = str(candidate.get("checkpoint_sha256") or "")
         runtime_candidate_samples = int((runtime.get("candidate_provenance_by_sha256") or {}).get(
@@ -3016,6 +3350,7 @@ class MainWindow(QMainWindow):
             ("Путь блокировки, аудит действий и откат прошли проверку", firewall_ready),
         ]
         completed_gates = sum(1 for _name, passed in gates if passed)
+        self._nn_gate_count_without_runtime = completed_gates
         readiness_percent = round(completed_gates * 100 / len(gates))
         self.nn_readiness_bar = QProgressBar()
         self.nn_readiness_bar.setRange(0, 100)
@@ -3047,9 +3382,13 @@ class MainWindow(QMainWindow):
             "при нуле ложных срабатываний нужно минимум 1 533 benign-потока (95% Wilson); при FP нужно больше.",
         ))
         gate_status = label("\n".join(gate_lines), muted=True, wrap=True)
+        self._nn_gate_status = gate_status
+        self._nn_runtime_status_label = label(
+            "Проверка runtime-журналов выполняется в фоне; результат появится здесь.",
+            muted=True, wrap=True)
         observed_p95 = runtime.get("p95_inference_ms")
         if observed_p95 is None:
-            gate_lines.append("Runtime inference: ещё нет успешных Pktmon-backed измерений.")
+            gate_lines.append("Runtime inference: журнал Pktmon проверяется; итог появится после проверки цепочки.")
         else:
             gate_lines.append(
                 f"Runtime inference: наблюдаемый P95 {observed_p95:.3f} мс "
@@ -3060,7 +3399,7 @@ class MainWindow(QMainWindow):
         gate_lines.append(
             "Потери сенсора: счётчики Pktmon собираются отдельно; оценка packet-drop rate пока не подтверждена.")
         gate_status.setText("\n".join(gate_lines))
-        p.lay.addWidget(card(self.nn_readiness_bar, gate_status,
+        p.lay.addWidget(card(self.nn_readiness_bar, gate_status, self._nn_runtime_status_label,
                              label("Обучение текущего checkpoint завершено. Прогресс показывает "
                                    "10 равновесных этапов допуска, а не точность или знания модели. "
                                    "Live-прогнозы не используются как метки.",
@@ -3095,7 +3434,82 @@ class MainWindow(QMainWindow):
                                  title="Проверка по отдельным захватам"))
 
         p.lay.addStretch(1)
+        self._start_nn_runtime_restore()
         return p
+
+    def _start_nn_runtime_restore(self):
+        """Verify append-only runtime journals off the UI thread and restore chart state."""
+        if getattr(self, "_nn_runtime_restore_started", False):
+            return
+        self._nn_runtime_restore_started = True
+        self._nn_journal_busy = True
+        db_path = DATA / "online" / "network_runtime_metrics.sqlite"
+        checkpoint_path = RESOURCE_ROOT / "models" / "network_flow_v3_candidate.pt"
+        candidate_hash = str(getattr(self, "_nn_candidate_sha256", "") or "")
+
+        def work(_progress):
+            from .network_runtime_evidence import recent_captured_flows, runtime_summary
+            summary = runtime_summary(db_path)
+            recent = recent_captured_flows(db_path, verified_summary=summary)
+            scores = []
+            if recent.get("flows"):
+                from .network_flow_model import assess_completed_packet_flows
+                restored = assess_completed_packet_flows(recent["flows"], checkpoint_path)
+                if restored.get("status") == "recommendation_candidate":
+                    scores = restored.get("flow_scores") or []
+            return summary, scores
+
+        def done(result):
+            summary, scores = result
+            if scores:
+                self._nn_monitor_flows.extend(scores[-200:])
+                self._nn_monitor_status = (
+                    f"Восстановлены и заново оценены последние {len(self._nn_monitor_flows)} "
+                    "завершённых потоков; локальные метки остаются неизвестными.")
+            elif summary.get("integrity_valid") is not True:
+                self._nn_monitor_status = "Журнал Pktmon не прошёл проверку целостности; оценки не восстановлены."
+            else:
+                self._nn_monitor_status = "Журнал проверен; завершённых потоков для восстановления нет."
+            self._refresh_nn_monitor()
+
+            candidate_samples = int((summary.get("candidate_provenance_by_sha256") or {}).get(
+                candidate_hash, 0) or 0)
+            complete_flows = int((summary.get("candidate_linked_complete_flows_by_sha256") or {}).get(
+                candidate_hash, 0) or 0)
+            linked_segments = int((summary.get("candidate_linked_segment_counts_by_sha256") or {}).get(
+                candidate_hash, 0) or 0)
+            gate_ready = (candidate_samples > 0 and complete_flows > 0
+                          and summary.get("capture_integrity_valid") is True
+                          and summary.get("captured_flow_integrity_valid") is True
+                          and summary.get("candidate_capture_link_integrity_valid") is True)
+            ready_count = self._nn_gate_count_without_runtime + int(gate_ready)
+            percent = round(ready_count * 100 / 10)
+            self.nn_readiness_bar.setValue(percent)
+            self.nn_readiness_bar.setFormat(f"{percent}% · {ready_count} из 10 этапов")
+            p95 = summary.get("p95_inference_ms")
+            p95_text = f"P95 инференса: {p95:.3f} мс." if p95 is not None else "P95 инференса: нет измерений."
+            self._nn_runtime_status_label.setText(
+                f"Runtime-журналы проверены. Связанных с кандидатом записей: {candidate_samples}; "
+                f"полных потоков: {complete_flows}; сегментов: {linked_segments}. {p95_text} "
+                "Это не подтверждает целевую нагрузку.")
+            self._nn_gate_status.setText(
+                self._nn_gate_status.text() + "\n"
+                + ("✓" if gate_ready else "○")
+                + f" Pktmon runtime evidence: {candidate_samples} записей, {complete_flows} полных потоков, "
+                f"{linked_segments} сегментов; целостность {'подтверждена' if gate_ready else 'не подтверждена'}.")
+
+        def failed(message):
+            self._nn_monitor_status = f"Проверка runtime-журнала не завершена: {message[:180]}"
+            self._refresh_nn_monitor()
+            self._nn_runtime_status_label.setText(self._nn_monitor_status)
+
+        worker = Worker(work, self)
+        worker.done.connect(done)
+        worker.fail.connect(failed)
+        worker.finished.connect(lambda: setattr(self, "_nn_journal_busy", False))
+        worker.finished.connect(lambda: self._workers.remove(worker) if worker in self._workers else None)
+        self._workers.append(worker)
+        worker.start()
 
     def _refresh_nn_monitor(self):
         """Refresh live scores from Pktmon inference results held in this window."""
@@ -3295,7 +3709,7 @@ class MainWindow(QMainWindow):
         worker.start()
 
     def _page_settings(self):
-        p = Page("Настройки", "Пути к реестру эталонов, модели детектора и ключу подписи пакетов.")
+        p = Page("Настройки", "Параметры сгруппированы по назначению. Изменения применяются после сохранения.")
         self.s_reg = PathEdit("Каталог реестра (эталоны, журнал событий)")
         self.s_model = PathEdit("Файл детектора detector.pt", False, "Модель (*.pt)")
         self.s_key = PathEdit("Файл ключа подписи (пусто — registry/signing.key или переменная IG_SIGNING_KEY)", False)
@@ -3308,15 +3722,26 @@ class MainWindow(QMainWindow):
         for i, (name, w) in enumerate((("Реестр", self.s_reg), ("Детектор", self.s_model), ("Ключ подписи", self.s_key))):
             g.addWidget(label(name, muted=True), i, 0)
             g.addWidget(w, i, 1)
+        btn = QPushButton("Сохранить источники", objectName="primary")
+        btn.clicked.connect(self._save_settings)
+        self.s_note = label("Файлы проверяются при сохранении.", muted=True)
+        row = QHBoxLayout()
+        row.addWidget(btn)
+        row.addWidget(self.s_note, 1)
+        p.lay.addWidget(card(g, row, title="Источники проверки"))
+
+        ops = QGridLayout()
+        ops.setVerticalSpacing(10)
+        ops.setHorizontalSpacing(12)
         self.s_auto = QCheckBox("Автоматически проверять реальные пакеты из папки входящих")
         self.s_auto.setChecked(str(self.settings.value("auto", "true")).lower() != "false")
-        g.addWidget(self.s_auto, 3, 1)
+        ops.addWidget(self.s_auto, 0, 0, 1, 2)
         self.s_autostart = QCheckBox("Запускать автоматически при входе в Windows (в трее, без открытия окна)")
         self.s_autostart.setChecked(self._autostart_enabled())
         if sys.platform != "win32" or not QSystemTrayIcon.isSystemTrayAvailable():
             self.s_autostart.setEnabled(False)
             self.s_autostart.setToolTip("Доступно только в Windows со значком в трее.")
-        g.addWidget(self.s_autostart, 4, 1)
+        ops.addWidget(self.s_autostart, 1, 0, 1, 2)
         self.s_retention = QSpinBox(minimum=0, maximum=3650, suffix=" дн.")
         self.s_retention.setToolTip("Через сколько дней автоматически удалять уже обработанные пакеты "
                                     "(allow/review/block) из data/processed. 0 — не удалять (хранить всегда).")
@@ -3324,15 +3749,15 @@ class MainWindow(QMainWindow):
             self.s_retention.setValue(int(self.settings.value("processed_retention_days", 30)))
         except (TypeError, ValueError):
             self.s_retention.setValue(30)
-        g.addWidget(label("Хранить обработанные пакеты во входящих", muted=True), 5, 0)
-        g.addWidget(self.s_retention, 5, 1)
-        btn = QPushButton("Сохранить", objectName="primary")
-        btn.clicked.connect(self._save_settings)
-        self.s_note = label("", muted=True)
-        row = QHBoxLayout()
-        row.addWidget(btn)
-        row.addWidget(self.s_note, 1)
-        p.lay.addWidget(card(g, row))
+        ops.addWidget(label("Срок хранения обработанных пакетов", muted=True), 2, 0)
+        ops.addWidget(self.s_retention, 2, 1)
+        ops_btn = QPushButton("Сохранить работу приложения", objectName="primary")
+        ops_btn.clicked.connect(self._save_settings)
+        self.s_ops_note = label("Настройки автоматизации и хранения.", muted=True)
+        ops_row = QHBoxLayout()
+        ops_row.addWidget(ops_btn)
+        ops_row.addWidget(self.s_ops_note, 1)
+        p.lay.addWidget(card(ops, ops_row, title="Автоматизация и хранение"))
 
         # --- политики блокировки
         pg = QGridLayout()
@@ -3355,13 +3780,15 @@ class MainWindow(QMainWindow):
         pg.addWidget(self.s_policy_block, 0, 1)
         pg.addWidget(label("(0 — отключено)", muted=True), 0, 2)
         pg.addWidget(self.s_policy_strict_stage, 1, 1, 1, 2)
+        pg.addWidget(label("Эти правила влияют на вердикт проверки пакета. Сетевой трафик ими не блокируется.",
+                           muted=True, wrap=True), 2, 0, 1, 3)
         pbtn = QPushButton("Сохранить политику", objectName="primary")
         pbtn.clicked.connect(self._save_policy)
         self.s_policy_note = label("", muted=True)
         prow = QHBoxLayout()
         prow.addWidget(pbtn)
         prow.addWidget(self.s_policy_note, 1)
-        p.lay.addWidget(card(pg, prow, title="Политики блокировки"))
+        p.lay.addWidget(card(pg, prow, title="Политика вердиктов для пакетов"))
         info = label(
             "<b>Встраивание в конвейер сборки и поставки.</b> Та же проверка доступна из командной строки:<br>"
             "<code>python -m integrityguard check --package &lt;каталог&gt; --strict</code><br>"
@@ -3494,12 +3921,14 @@ jobs:
             self._auto_start()
         else:
             self.auto_timer.stop()
-            self.e_auto_note.setText("Автоматический режим выключен (включается в настройках).")
+            self._set_auto_note("Автоматический режим выключен (включается в настройках).")
         self._guard = None
         self._refresh_status()
         self._load_metrics()
         self._load_monitor()
         self.s_note.setText("Сохранено.")
+        if hasattr(self, "s_ops_note"):
+            self.s_ops_note.setText("Настройки сохранены и применены.")
 
 
     def _save_policy(self):
@@ -3589,6 +4018,7 @@ def main(start_minimized=False):
         return
     app.aboutToQuit.connect(instance.close)
     app.setQuitOnLastWindowClosed(True)                # закрытие главного окна завершает процесс
+    app.aboutToQuit.connect(lambda: w.shutdown_background())   # w is bound below, before app.exec()
     app.setStyle("Fusion")
     try:                                              # тёмные заголовки окон и системных диалогов (Qt 6.8+)
         app.styleHints().setColorScheme(Qt.ColorScheme.Dark)
@@ -3603,7 +4033,15 @@ def main(start_minimized=False):
         w.hide()
     else:
         w.show()
-    sys.exit(app.exec())
+    code = app.exec()
+    # Capture work was stopped above. QThread and non-daemon threading workers cannot be
+    # joined safely at interpreter exit, so end the process hard once cleanup is done.
+    for stream in (sys.stdout, sys.stderr):
+        try:
+            stream.flush()
+        except (OSError, ValueError, AttributeError):
+            pass
+    os._exit(code)
 
 
 if __name__ == "__main__":

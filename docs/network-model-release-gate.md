@@ -958,6 +958,7 @@ Checkpoints `ctu13-v10-gate5-run*.pt` — только research-артефакт
 
 - Перед штатной остановкой приложение и повышенный helper повторно читают `pktmon status` и сверяют активный ETL-путь с путём сегмента, который они сами запустили. Если Pktmon недоступен, остановлен или путь изменился, сегмент отклоняется, а глобальная сессия не останавливается.
 - Все elevated lab-сценарии используют общий `tools/lab/pktmon_session.ps1`: предварительное безусловное `pktmon stop` удалено; старт разрешён только при подтверждённо остановленном Pktmon; stop разрешён только при совпадении активного ETL-пути, с последующей проверкой остановки.
+- Если Pktmon временно занят захватом IntegrityGuard, общий helper ждёт до 45 секунд только при совпадении `segment.etl`, temp-пути, `owner.json`, PID/времени создания и исполняемого файла приложения. Незнакомую или неподтверждённую сессию не останавливает и сразу сообщает её ETL-путь.
 - Скрипт перезапуска приложения дополнительно перепроверяет ETL-путь и `owner.json` после остановки старого процесса и непосредственно перед stop.
 - Python AST и PowerShell Parser прошли статическую проверку для двух Python-модулей и 16 PowerShell-скриптов. Живой захват не запускался и Pktmon-сессия не менялась. Эти изменения уменьшают риск взаимного прерывания, но не устраняют ограничение глобального Pktmon API между независимыми внешними процессами; для подтверждения реальной полноты нужен отдельный контролируемый захват и сравнение счётчиков.
 
@@ -970,28 +971,34 @@ Checkpoints `ctu13-v10-gate5-run*.pt` — только research-артефакт
 
 ## Host background advisory evaluation (24.11.2026, research-only)
 
+- **Label correction:** the old derived host shards were mislabeled as benign despite lacking ground truth. Corrected feature-only host shards are rebuilt under `outputs/lab/unlabeled_host_v13/`: 129 shards, 5,709 complete included flows, all `y=-1` (109 calibration, 20 chronological check). Six source segments had no complete included flows and were skipped. The old 129 shard pairs and rule are preserved under `outputs/lab/quarantine_unlabeled_host_v1/`; source `.pcapng` files are unchanged.
+- No model was trained or evaluated as part of this correction. The advisory script changed and its old registration hash is stale. Any future diagnostic requires a new preregistration and fresh check capture; the prior check period is not independent evidence.
 - Registration (written before the run): `outputs/lab/registrations/lab-host-advisory-registration-20261124.json`, script `tools/lab/lab_host_advisory_crossfamily.py` (sha256 `380b12ca13c69a7df8ff1d9c3408e327fa38a8959d04d6e277f9e89a1c2f40c9`). Criteria are copied unchanged from `lab-host-background-registration-20261124.json`: scope scan only, scan recall >= 0.90, check alarm rate <= 0.01, threshold = 99th percentile of calibration host background.
-- Split: calibration = host segments starting before 2026-11-24T02:00Z (109 shards, 4963 benign flows, all unlabelled); check = segments after that time (20 shards, 746 flows). Six segments were skipped because they produced no complete labelled flows. The lab subnet 172.20.0.0/24 is excluded.
+- Historical split: calibration = host segments starting before 2026-11-24T02:00Z (109 shards, 4,963 flows, **unlabeled but incorrectly stored as y=0**); check = segments after that time (20 shards, 746 flows, also unlabeled). Six segments were skipped because they produced no complete included flows. The lab subnet 172.20.0.0/24 is excluded.
 - Training is unchanged from the lab template: lab v13 attack shards plus lab v13 benign background. Host shards are used only for the threshold (calibration) and the alarm rate (check).
-- Result, scan fold, full 57 features: threshold from calibration 0.993832; AUC 0.9167; scan recall 0/6040 = 0.0000 (95% Wilson upper 0.0006).
-- Check alarm rate: overall 0/746 = 0.0000 (95% upper 0.0051); one-way UDP stratum 0/204; other stratum 0/542 = 0.0000 (95% upper 0.0070).
-- Criteria: scan recall >= 0.90 is **not met** (0.0000). Check alarm rate <= 0.01 is **met** (0.0000 overall and for the other stratum), but this pass says little: nothing was flagged, not only on background but also on scan traffic.
+- Historical result, scan fold, full 57 features: threshold from calibration 0.993832; the previously reported mixed-label AUC 0.9167 is **withdrawn** because host check rows had no ground-truth labels; labeled scan recall was 0/6040 = 0.0000 (95% Wilson upper 0.0006).
+- Descriptive host-check alarm rate: 0/746 = 0.0000 (95% upper 0.0051); one-way UDP stratum 0/204; other stratum 0/542 = 0.0000 (95% upper 0.0070). These are alert counts on unlabeled traffic, not false positives or FPR.
+- Historical criteria calculation: scan recall >= 0.90 was **not met** (0.0000). The host alarm rate was 0.0000, but it cannot satisfy an FPR criterion. Nothing was flagged, not only on host background but also on scan traffic.
 - Out of scope, reported as limitations: flood fold recall 0.0256 (AUC 0.5071); SSH fold recall 0.0000 (AUC 0.0041).
 - Result file: `outputs/lab/results_host_advisory/lab_host_advisory_crossfamily_full.json` (not committed; outputs are git-ignored).
-- Caveats: host background is unlabelled normal host traffic, not confirmed benign, so the alarm rate is not a labelled FPR and is not comparable to the release gate FPR. The threshold came only from calibration shards (the 99th percentile on host calibration is about 0.99, far above the lab threshold of about 0.001 for the scan fold, so the threshold does not transfer to scan traffic). No blocking. No promotion.
+- Caveats: host background is unlabelled traffic, not confirmed benign, so the alarm rate is not a labelled FPR and is not comparable to the release gate FPR. The historical threshold came only from calibration shards (the 99th percentile on host calibration is about 0.99, far above the lab threshold of about 0.001 for the scan fold, so the threshold does not transfer to scan traffic). No blocking. No promotion.
 
 ## Host negatives in training (24.11.2026, research-only)
+
+> **Correction (24.11.2026): invalid as a supervised-label experiment.** The host-background rule used by the historical v1 ingest assigned every non-lab flow `benign`/`y=0` despite having no ground-truth label. This is a label-provenance error, not evidence that the rows were benign. The reported supervised result (including recall, AUC, and threshold behavior) must not be used to select, train, compare, or promote a model. The old derived shards are quarantined for audit only; source captures are retained. The runner is retired and exits before training. The capture-derived host rows are now represented as `unlabeled`/`y=-1`, isolated from supervised shards, and the shard loader rejects them by default.
+
+> **Correction to host advisory metrics:** the historical advisory script also combined labeled attack rows with unlabeled host-check rows to compute ROC AUC, treating the latter as class 0. That AUC is invalid and withdrawn. Historical counts of model alerts on the host capture can only be described as an unlabeled-host alarm rate; they are not FPR. The corrected script reports alarm rate and interval without assigning labels to host rows or calculating mixed-class AUC.
 
 - Регистрация записана до запуска: `outputs/lab/registrations/lab-host-negatives-registration-20261124.json` (хеш скрипта `e42733d9…`). Скрипт `tools/lab/lab_host_negatives_crossfamily.py`. Критерии скопированы без изменений из `lab-host-background-registration-20261124.json`: область только сканирование, полнота сканирования >= 0.90, доля срабатываний на проверочном фоне <= 0.01, порог — 99-й перцентиль калибровочного фона.
 - Разбиение по времени (не по имени): 109 калибровочных шардов `host-cal-*` отсортированы по минимальному `first_seen` шарда. Первые 76 (floor(0.7 · 109)) — HOST_TRAIN, добавлены в обучение как негативы. Остальные 33 — HOST_THRESHOLD, используются только для порога. Граница разбиения: 2026-11-23T20:14:29.269930Z (первый шард порога `host-cal-4ee37ad2e300`).
 - Счётчики: HOST_TRAIN — 76 шардов, 4033 потока; HOST_THRESHOLD — 33 шарда, 930 потоков; проверка — 20 шардов, 746 потоков. Обучающий фон: лабораторные `v13-benign-06/07/09/13/14b` плюс HOST_TRAIN (всего 4946 строк фона в каждом fold; обучающих атак 116 645 в fold scan).
-- Результат, fold «scan», полный вариант (57 признаков): порог 0,033488; AUC 0,9816.
+- Исторический результат, fold «scan», полный вариант (57 признаков): порог 0,033488; ранее указанный смешанный AUC 0,9816 **отозван** из-за назначения непомеченному фону класса benign.
   - Полнота сканирования: **114 / 6040 = 0,0189** (95% Wilson 0,0157–0,0226). Критерий >= 0,90 — **не выполнен**.
-  - Срабатывания на проверочном фоне, все: **4 / 746 = 0,0054** (95% верхняя граница 0,0137). Точечная оценка <= 0,01 — выполнено; верхняя граница выше 0,01, поэтому на уровне 95% критерий не подтверждён.
-  - Срабатывания на односторонних UDP: 4 / 204 = 0,0196 (верхняя граница 0,0493).
-  - Срабатывания на остальном фоне: **0 / 542 = 0,0000** (верхняя граница 0,0070).
-- Информативность: сигнал есть, но слабый. Модель отметила 114 потоков сканирования (из 6040) и 4 потока проверочного фона, то есть не пуста. Полнота при этом далеко от порога 0,90.
-- Для сравнения с предыдущей регистрацией (`lab-host-advisory-registration-20261124.json`): полнота сканирования выросла с 0,0000 до 0,0189, AUC — с 0,9167 до 0,9816, порог упал с 0,9938 до 0,0335. Вероятная причина — калибровка на 33 более поздних шардах и обучение на фоне хоста.
+  - Срабатывания на непомеченном проверочном фоне, все: **4 / 746 = 0,0054** (95% верхняя граница 0,0137). Это доля тревог, не FPR; сравнение с лимитом FPR недействительно.
+  - Срабатывания на односторонних UDP: 4 / 204 = 0,0196 (верхняя граница 0,0493), описательная доля тревог.
+  - Срабатывания на остальном фоне: **0 / 542 = 0,0000** (верхняя граница 0,0070), описательная доля тревог.
+- Исторические счётчики: модель отметила 114 потоков размеченного сканирования (из 6040) и 4 потока непомеченного проверочного фона. Из-за неверной supervised-разметки это невалидная оценка модели и не может использоваться для выбора/продвижения checkpoint.
+- Предыдущее сравнение с регистрацией `lab-host-advisory-registration-20261124.json` отозвано: обе оценки обучались на разных схемах, смешивали неизвестный фон с supervised-метками и/или использовали его как класс AUC; разницу AUC нельзя интерпретировать.
 - Fold «flood» (вне области): полнота 0,0000, AUC 0,624. Fold «ssh» (вне области): полнота 0,0000, AUC 0,559.
 - Вывод: гейт не пройден. Сканирование с обучением на фоне хоста даёт полноту 0,019, что недостаточно. Блокировка не включена, модель не продвигается.
 - Ограничения:

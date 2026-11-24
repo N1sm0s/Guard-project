@@ -368,7 +368,7 @@ def iter_windows(packets, window_seconds: float = DEFAULT_WINDOW_SECONDS, on_pac
 
 # --------------------------------------------------------------------------- labels
 
-_LABELS = {"attack": 1, "benign": 0, "exclude": None}
+_LABELS = {"attack": 1, "benign": 0, "unlabeled": -1, "exclude": None}
 
 
 class LabelRule:
@@ -392,7 +392,7 @@ class LabelRule:
             raise IngestError("Label rule needs rule_id and publisher_reference")
         default = spec.get("default", "exclude")
         if default not in _LABELS:
-            raise IngestError("Label rule default must be attack, benign or exclude")
+            raise IngestError("Label rule default must be attack, benign, unlabeled or exclude")
         self.spec, self.default, self.rules = spec, default, []
         for item in spec.get("rules", []):
             label = item.get("label")
@@ -500,8 +500,8 @@ def ingest_capture(*, source: str, source_id: str, role: str, label_rule_path: P
     counts = {"packets": 0, "parsed": 0, "non_ip_frames": 0, "unsupported_or_truncated": 0,
               "windows": 0, "windows_flow_limit_reached": 0, "windows_with_errors": 0,
               "flows_total": 0, "flows_incomplete_excluded": 0, "flows_feature_error": 0,
-              "flows_label_excluded": 0, "attack": 0, "benign": 0,
-              "incomplete_by_protocol": {}, "labelled_by_protocol": {}}
+              "flows_label_excluded": 0, "attack": 0, "benign": 0, "unlabeled": 0,
+              "incomplete_by_protocol": {}, "assigned_by_protocol": {}}
     ip_macs: dict[str, set] = {}
 
     def observe(packet):
@@ -540,9 +540,10 @@ def ingest_capture(*, source: str, source_id: str, role: str, label_rule_path: P
                     continue
                 features.append(flow[feature_key]); labels.append(target)
                 windows.append(index); first_seen.append(flow["first_seen"])
-                counts["attack" if target else "benign"] += 1
-                key = f"{flow['protocol']}:{'attack' if target else 'benign'}"
-                by = counts["labelled_by_protocol"]
+                label_name = {1: "attack", 0: "benign", -1: "unlabeled"}[target]
+                counts[label_name] += 1
+                key = f"{flow['protocol']}:{label_name}"
+                by = counts["assigned_by_protocol"]
                 by[key] = by.get(key, 0) + 1
             ip_macs.clear()
         if status == "ok":
@@ -564,7 +565,7 @@ def ingest_capture(*, source: str, source_id: str, role: str, label_rule_path: P
     if not all(checks.values()):
         raise IngestError(f"Checksum mismatch {checks}; no shard written")
     if not labels:
-        raise IngestError("No complete, labelled flows were produced; no shard written")
+        raise IngestError("No complete, included flows were produced; no shard written")
 
     np.savez_compressed(
         shard_path,
@@ -611,8 +612,13 @@ def ingest_capture(*, source: str, source_id: str, role: str, label_rule_path: P
     return manifest
 
 
-def load_shard(manifest_path: Path, *, expected_role: str = "train"):
-    """Load a shard after verifying its manifest, hash and feature contract."""
+def load_shard(manifest_path: Path, *, expected_role: str = "train", allow_unlabeled: bool = False):
+    """Load a shard after verifying provenance and labels.
+
+    Unknown labels are rejected by default so they cannot silently become benign
+    through downstream ``y == 0`` logic. Opt in only for label-free scoring or
+    descriptive alarm-rate analysis.
+    """
     manifest_path = Path(manifest_path)
     manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
     if manifest.get("format") != SHARD_FORMAT:
@@ -641,4 +647,8 @@ def load_shard(manifest_path: Path, *, expected_role: str = "train"):
         x, y = data["x"], data["y"].astype(np.int64)
     if x.shape != (len(y), len(expected_names)):
         raise IngestError("Shard array shape is inconsistent")
+    if not np.isin(y, (-1, 0, 1)).all():
+        raise IngestError("Shard contains an unsupported label value")
+    if not allow_unlabeled and (y < 0).any():
+        raise IngestError("Shard contains unlabeled rows; pass allow_unlabeled=True only for non-supervised use")
     return x, y, manifest

@@ -1,5 +1,10 @@
 """Pre-registered leave-one-attack-family-out on lab schema v13 shards, with host negatives in training (research-only, advisory).
 
+RETIRED: the host capture rows used by this experiment have no ground-truth
+labels. Historical runs incorrectly encoded them as y=0. Do not execute or reuse
+their scores as supervised model evidence. The historical code and result
+provenance remain below for audit only.
+
 Shards: outputs/lab/shards_v13/ (57 features: v12 + four packet-size statistics).
 Training background: the lab v13 training background (v13-benign-06/07/09/13/14b) PLUS the host training part (HOST_TRAIN):
 the first 70% (rounded down) of the 109 host calibration shards, ordered by the minimum first_seen of each shard.
@@ -17,6 +22,12 @@ Usage: python tools/lab/lab_host_negatives_crossfamily.py --features full|nonvol
 """
 
 from __future__ import annotations
+
+if __name__ == "__main__":
+    raise SystemExit(
+        "Retired: host background is unlabeled and cannot be used as supervised negatives. "
+        "See docs/network-model-release-gate.md for the correction."
+    )
 
 import argparse
 import hashlib

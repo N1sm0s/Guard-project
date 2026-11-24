@@ -13,6 +13,7 @@ import re
 import shutil
 import subprocess
 import tempfile
+import threading
 import time
 from pathlib import Path
 
@@ -23,6 +24,22 @@ _CAPTURE_SECONDS_MAX = 30
 _ETL_LIMIT_MB = 64
 _LEGACY_CAPTURE_IDLE_SECONDS = 30 * 60
 _OWNER_FILE = "owner.json"
+
+# Set on application exit. A capture in progress wakes early, stops its own
+# Pktmon session through the owned-stop path, and returns; no new capture starts.
+_STOP_REQUESTED = threading.Event()
+
+
+def request_capture_stop() -> None:
+    _STOP_REQUESTED.set()
+
+
+def clear_capture_stop() -> None:
+    _STOP_REQUESTED.clear()
+
+
+def capture_stop_requested() -> bool:
+    return _STOP_REQUESTED.is_set()
 
 
 def _is_admin() -> bool:
@@ -210,6 +227,45 @@ def _stop_owned_capture(etl_path: Path | str) -> tuple[bool, str]:
     return True, ""
 
 
+def _owner_names_this_process(owner_path: Path) -> bool:
+    """True only when owner.json names this exact process (pid and creation time). Fails closed."""
+    try:
+        owner = json.loads(owner_path.read_text(encoding="utf-8"))
+        if int(owner["pid"]) != os.getpid():
+            return False
+        created = float(owner["process_create_time"])
+        import psutil
+        return abs(float(psutil.Process(os.getpid()).create_time()) - created) < 0.01
+    except Exception:  # noqa: BLE001 — any doubt means the session is not ours
+        return False
+
+
+def stop_own_capture_session() -> tuple[bool, str]:
+    """Stop an active Pktmon session only if its owner marker names this process.
+
+    Foreign or unmarked sessions are left alone. A confirmed stop is verified by
+    _stop_owned_capture (status must report not running afterwards).
+    """
+    try:
+        status = _run(["status"])
+    except (OSError, subprocess.SubprocessError) as error:
+        return False, f"Не удалось проверить Pktmon при выходе ({type(error).__name__})."
+    text = f"{status.stdout}\n{status.stderr}"
+    if _is_not_running(text):
+        return True, ""
+    if status.returncode != 0:
+        return False, "Не удалось проверить Pktmon при выходе."
+    etl_path = _active_etl_path(text)
+    if etl_path is None or not _is_owned_capture_path(etl_path):
+        return False, "Активная Pktmon-сессия не принадлежит приложению; она не остановлена."
+    if not _owner_names_this_process(etl_path.parent / _OWNER_FILE):
+        return False, "Владелец активной Pktmon-сессии не подтверждён как этот процесс; она не остановлена."
+    stopped, reason = _stop_owned_capture(etl_path)
+    if stopped:
+        shutil.rmtree(etl_path.parent, ignore_errors=True)
+    return stopped, reason
+
+
 def _recover_stale_owned_capture(status_text: str) -> bool:
     """Stop only a confirmed stale capture with our own persisted PID marker."""
     etl_path = _active_etl_path(status_text)
@@ -246,6 +302,8 @@ def _keep_segment(pcapng_path: Path, sha256: str) -> Path:
 
 def capture_header_segment(duration_seconds: int = 10) -> dict:
     """Capture one bounded segment. Never stops a Pktmon session it did not start."""
+    if capture_stop_requested():
+        return {"status": "cancelled", "reason": "Приложение завершается; захват не запущен."}
     if os.name != "nt":
         return {"status": "unsupported_platform", "reason": "Pktmon доступен только в Windows."}
     if not _is_admin():
@@ -298,7 +356,7 @@ def capture_header_segment(duration_seconds: int = 10) -> dict:
                 return {"status": "pktmon_start_error",
                         "reason": (start.stderr or start.stdout or "Pktmon не запустился.").strip()[:400]}
             started = True
-            time.sleep(duration)
+            _STOP_REQUESTED.wait(duration)     # wakes early on exit; the finally below stops our session
             try:
                 counters = _run(["counters", "--json"], timeout=15)
                 counter_text = (counters.stdout or "").strip()
@@ -320,6 +378,8 @@ def capture_header_segment(duration_seconds: int = 10) -> dict:
         if not stop_result:
             return {"status": "pktmon_stop_error",
                     "reason": stop_reason if started else "Захват не был запущен приложением; Pktmon не остановлен."}
+        if capture_stop_requested():
+            return {"status": "cancelled", "reason": "Захват прерван при выходе из приложения."}
         capture_end_timestamp = time.time()
         if not etl_path.is_file() or etl_path.stat().st_size == 0:
             return {"status": "empty_capture", "reason": "Pktmon не сохранил пакеты в этом интервале."}

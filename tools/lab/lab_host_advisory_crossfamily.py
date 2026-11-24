@@ -1,12 +1,15 @@
-"""Pre-registered leave-one-attack-family-out on lab schema v13 shards, with host background (research-only, advisory).
+"""Research-only leave-one-attack-family-out diagnostic with unlabeled host traffic.
 
 Shards: outputs/lab/shards_v13/ (57 features: v12 + four packet-size statistics).
-Calibration (threshold): 109 host background shards (host-cal-*), captured before 2026-11-24T02:00Z.
-Check: 20 host background shards (host-chk-*), captured after 2026-11-24T02:00Z, scored after the threshold is fixed.
-Host background is unlabelled normal host traffic (lab subnet excluded), NOT confirmed benign. The check result is
-therefore an alarm rate on unlabelled normal host traffic, not a labelled FPR, and is not comparable to the release gate FPR.
+Host shards are read from outputs/lab/unlabeled_host_v13/ and must contain only y=-1.
+Calibration (threshold): 109 host background shards captured before 2026-11-24T02:00Z.
+Check: 20 host background shards captured after 2026-11-24T02:00Z.
+Host background has no ground-truth labels and is NOT confirmed benign. Its alert count is a descriptive alarm rate,
+not a labelled FPR and not comparable to the release-gate FPR. The existing registration predates this corrected
+script and its hash is stale; preregister a new run before evaluating any new capture.
 Attack families and training background are the lab v13 shards, as in the template.
-The check FPR is reported overall and split into two strata fixed by the feature direction_asym (one-way: > 0.99; the rest).
+The unlabeled-host alarm rate is reported overall and split into two strata fixed by direction_asym
+(one-way: > 0.99; the rest). These values are not FPR because the host rows have no ground truth.
 No blocking; no promotion.
 
 Usage: python tools/lab/lab_host_advisory_crossfamily.py --features full|nonvolume --registration <json> --out <dir>
@@ -21,7 +24,6 @@ import time
 from pathlib import Path
 
 import numpy as np
-from sklearn.metrics import roc_auc_score
 
 ROOT = Path(__file__).resolve().parents[2]
 sys.path[:0] = [str(ROOT), str(ROOT / "tools")]
@@ -29,6 +31,7 @@ import loco_ctu13_diagnostic as loco  # noqa: E402
 from integrityguard import network_flow_schema_v13 as v13  # noqa: E402
 
 SHARDS = ROOT / "outputs" / "lab" / "shards_v13"
+HOST_SHARDS = ROOT / "outputs" / "lab" / "unlabeled_host_v13"
 FAMILIES = {
     "flood": ["v13-udp-03", "v13-flood-02", "v13-flood-03"],
     "scan": ["v13-scan-01", "v13-scan-02", "v13-scan-03", "v13-scan-04"],
@@ -181,6 +184,16 @@ def load(sid: str, keep: list[int]):
         return data["x"][:, keep], data["y"].astype(np.int64)
 
 
+def load_host(sid: str, keep: list[int]):
+    from integrityguard.stream_ingest import IngestError, load_shard
+
+    x, y, _manifest = load_shard(HOST_SHARDS / f"{sid}.manifest.json", expected_role="dev",
+                                  allow_unlabeled=True)
+    if not np.all(y == -1):
+        raise IngestError(f"Host shard {sid} has labels other than -1; refusing host-rate analysis")
+    return x[:, keep], y
+
+
 def main(argv=None) -> int:
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     parser.add_argument("--features", choices=("full", "nonvolume"), required=True)
@@ -195,8 +208,8 @@ def main(argv=None) -> int:
     all_idx = list(range(len(v13.FEATURE_NAMES)))
     keep = all_idx if args.features == "full" else [i for i in all_idx if i not in VOLUME_DROP]
 
-    x_cal = np.concatenate([load(s, keep)[0] for s in CALIBRATION])
-    chk = [load(s, keep) for s in CHECK]
+    x_cal = np.concatenate([load_host(s, keep)[0] for s in CALIBRATION])
+    chk = [load_host(s, keep) for s in CHECK]
     x_chk = np.concatenate([c[0] for c in chk])
     # direction_asym is kept in both variants; its position inside the kept vector:
     dir_pos = keep.index(DIRECTION)
@@ -218,23 +231,25 @@ def main(argv=None) -> int:
         flagged = s_chk >= threshold
         tp = int((sh >= threshold).sum())
         n_att, n_ben = len(sh), len(s_chk)
-        auc = float(roc_auc_score(np.concatenate([np.ones(n_att), np.zeros(n_ben)]),
-                                  np.concatenate([sh, s_chk])))
         def stratum(mask):
             n = int(mask.sum())
-            fp = int(flagged[mask].sum())
-            return {"flows": n, "fp": fp, "fpr": fp / max(n, 1), "fpr_ci95_upper": loco.wilson(fp, n)[1]}
+            alerts = int(flagged[mask].sum())
+            return {"flows": n, "alerts": alerts, "alarm_rate": alerts / max(n, 1),
+                    "alarm_rate_ci95": list(loco.wilson(alerts, n))}
         results.append({"held_out_family": held, "held_out_shards": held_ids,
                         "train_attack": int((y_tr == 1).sum()), "train_background": int((y_tr == 0).sum()),
-                        "threshold_from_calibration": threshold, "auc": auc,
+                        "host_labels": "unlabeled (-1); host alarm rates are not FPR",
+                        "threshold_from_unlabeled_host_calibration": threshold,
                         "test_attack": n_att, "recall": tp / max(n_att, 1), "recall_ci95": list(loco.wilson(tp, n_att)),
                         "check_overall": stratum(np.ones(n_ben, dtype=bool)),
                         "check_one_way_udp": stratum(one_way_mask),
                         "check_other": stratum(~one_way_mask),
                         "seconds": round(time.time() - started, 1)})
-        print(f"[{args.features}] held {held}: AUC={auc:.4f} recall={tp / max(n_att, 1):.4f} "
-              f"fpr_overall={flagged.mean():.4f} fpr_other={flagged[~one_way_mask].mean():.4f}", flush=True)
+        print(f"[{args.features}] held {held}: recall={tp / max(n_att, 1):.4f} "
+              f"host_alarm_rate={flagged.mean():.4f} "
+              f"host_alarm_rate_other={flagged[~one_way_mask].mean():.4f}", flush=True)
     report = {"kind": "lab_host_advisory_crossfamily", "features": args.features, "feature_count": len(keep),
+              "host_label_status": "unlabeled; no host FPR or mixed-class AUC is computed",
               "research_only": True, "promotion_eligible": False,
               "registration_sha256": sha256_file(args.registration), "script_sha256": sha256_file(Path(__file__)),
               "folds": results}

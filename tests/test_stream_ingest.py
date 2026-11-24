@@ -181,7 +181,7 @@ def test_mac_rule_labels_attacker_device_and_protocol(tmp_path):
     manifest = si.ingest_capture(source=str(src), source_id="mac", role="train",
                                  label_rule_path=rule, out_dir=tmp_path / "out")
     counts = manifest["counts"]
-    assert counts["labelled_by_protocol"] == {"udp:attack": 1}
+    assert counts["assigned_by_protocol"] == {"udp:attack": 1}
     assert counts["flows_label_excluded"] == 2  # Pi TCP flow and other device's UDP
     assert b"dc:a6:32" not in (tmp_path / "out" / "mac.npz").read_bytes()
 

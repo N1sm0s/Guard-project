@@ -53,18 +53,8 @@ if __name__ == "__main__":
     if sys.stdout is None or sys.stderr is None:          # pythonw: вывод некуда писать — ведём журнал в файл
         DATA_ROOT.mkdir(parents=True, exist_ok=True)
         sys.stdout = sys.stderr = open(DATA_ROOT / "app.log", "a", encoding="utf-8", buffering=1)
-    # недостающие небольшие библиотеки доустанавливаются сами (например, после обновления программы)
-    import importlib.util
-    import subprocess
-    missing = [m for m in ("psutil", "matplotlib") if importlib.util.find_spec(m) is None]
-    if missing and not FROZEN:
-        exe = Path(sys.executable).with_name("python.exe" if os.name == "nt" else "python")
-        try:
-            subprocess.run([str(exe if exe.exists() else sys.executable), "-m", "pip", "install", "-q", *missing],
-                           timeout=600, creationflags=0x08000000 if os.name == "nt" else 0,
-                           stdout=sys.stdout, stderr=sys.stderr)
-        except Exception as e:  # noqa: BLE001 — без сети программа запускается и без них
-            print("auto-install failed:", e)
+    # Запуск UI не должен ждать сеть/pip (раньше установка могла блокировать до 10 минут).
+    # Необязательные функции сами проверяют наличие psutil; зависимости ставятся через install.bat.
     try:
         from integrityguard.gui import main
         main(start_minimized="--tray" in sys.argv[1:])
