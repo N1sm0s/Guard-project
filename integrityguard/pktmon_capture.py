@@ -181,6 +181,35 @@ def _legacy_capture_is_stale(etl_path: Path) -> bool | None:
         return None
 
 
+def _same_capture_path(left: Path | str, right: Path | str) -> bool:
+    try:
+        return os.path.normcase(os.path.abspath(left)) == os.path.normcase(os.path.abspath(right))
+    except (OSError, TypeError, ValueError):
+        return False
+
+
+def _stop_owned_capture(etl_path: Path | str) -> tuple[bool, str]:
+    """Stop Pktmon only while its current ETL path still identifies our capture."""
+    try:
+        current = _run(["status"])
+    except (OSError, subprocess.SubprocessError) as error:
+        return False, f"Не удалось повторно проверить Pktmon перед остановкой ({type(error).__name__})."
+    current_text = f"{current.stdout}\n{current.stderr}"
+    current_path = _active_etl_path(current_text)
+    if (current.returncode != 0 or _is_not_running(current_text)
+            or current_path is None or not _same_capture_path(current_path, etl_path)):
+        return False, "Активный ETL больше не совпадает с сегментом приложения; чужая сессия не остановлена."
+    try:
+        stopped = _run(["stop"], timeout=30)
+        verify = _run(["status"])
+    except (OSError, subprocess.SubprocessError) as error:
+        return False, f"Не удалось подтвердить остановку Pktmon ({type(error).__name__})."
+    verify_text = f"{verify.stdout}\n{verify.stderr}"
+    if stopped.returncode != 0 or verify.returncode != 0 or not _is_not_running(verify_text):
+        return False, "Штатная остановка Pktmon не подтверждена."
+    return True, ""
+
+
 def _recover_stale_owned_capture(status_text: str) -> bool:
     """Stop only a confirmed stale capture with our own persisted PID marker."""
     etl_path = _active_etl_path(status_text)
@@ -190,26 +219,8 @@ def _recover_stale_owned_capture(status_text: str) -> bool:
     stale_legacy = owner_state is None and _legacy_capture_is_stale(etl_path) is True
     if owner_state is not False and not stale_legacy:
         return False
-    # Recheck immediately before the global stop command in case the active
-    # session changed since the first status query.
-    try:
-        current = _run(["status"])
-    except (OSError, subprocess.SubprocessError):
-        return False
-    current_text = f"{current.stdout}\n{current.stderr}"
-    current_path = _active_etl_path(current_text)
-    if (current.returncode != 0 or _is_not_running(current_text)
-            or current_path is None
-            or os.path.normcase(os.path.abspath(current_path))
-            != os.path.normcase(os.path.abspath(etl_path))):
-        return False
-    try:
-        stopped = _run(["stop"], timeout=30)
-        verify = _run(["status"])
-    except (OSError, subprocess.SubprocessError):
-        return False
-    verify_text = f"{verify.stdout}\n{verify.stderr}"
-    if stopped.returncode != 0 or verify.returncode != 0 or not _is_not_running(verify_text):
+    stopped, _reason = _stop_owned_capture(etl_path)
+    if not stopped:
         return False
     try:
         shutil.rmtree(etl_path.parent)
@@ -304,13 +315,11 @@ def capture_header_segment(duration_seconds: int = 10) -> dict:
             return {"status": "pktmon_start_error", "reason": type(error).__name__}
         finally:
             if started:
-                try:
-                    stop_result = _run(["stop"], timeout=30)
-                except (OSError, subprocess.SubprocessError):
-                    stop_result = None
-        if stop_result is None or stop_result.returncode != 0:
+                stop_ok, stop_reason = _stop_owned_capture(etl_path)
+                stop_result = stop_ok
+        if not stop_result:
             return {"status": "pktmon_stop_error",
-                    "reason": "Не подтверждена штатная остановка захвата; сегмент не оценивается."}
+                    "reason": stop_reason if started else "Захват не был запущен приложением; Pktmon не остановлен."}
         capture_end_timestamp = time.time()
         if not etl_path.is_file() or etl_path.stat().st_size == 0:
             return {"status": "empty_capture", "reason": "Pktmon не сохранил пакеты в этом интервале."}

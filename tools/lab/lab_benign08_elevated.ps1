@@ -3,6 +3,8 @@
 # each on a new TCP connection. Journal entry is written before start and closed after.
 $ErrorActionPreference = "Continue"
 $root = "F:\New\integrityguard"
+. (Join-Path $PSScriptRoot 'pktmon_session.ps1')
+Assert-PktmonStopped
 $dir = Join-Path $root "outputs\lab\session"
 $key = Join-Path $env:USERPROFILE ".ssh\ig_lab"
 $progress = Join-Path $dir "benign-08-run.txt"
@@ -23,14 +25,15 @@ Start-Sleep -Seconds 2
 $etl = Join-Path $dir "benign-08.etl"
 $pcap = Join-Path $dir "benign-08.pcapng"
 Remove-Item $etl, $pcap -ErrorAction SilentlyContinue
-pktmon stop 2>&1 | Out-Null
+    Assert-PktmonStopped
 pktmon start --capture --comp all --file-name $etl 2>&1 | Out-String | ForEach-Object { Log ("pktmon start: " + $_.Trim()) }
+    Assert-PktmonOwned -EtlPath $etl
 Start-Sleep -Seconds 2
 $cmd = 'ok=0; for i in $(seq 1 300); do curl -s -o /dev/null --no-keepalive -w "%{http_code}" http://172.20.0.10:8080/ | grep -q 200 && ok=$((ok+1)); sleep 0.5; done; echo "ok=$ok"'
 $run = ssh -i $key -o BatchMode=yes pavel@172.20.0.5 $cmd 2>&1 | Out-String
 Log ("run: " + $run.Trim())
 Start-Sleep -Seconds 2
-pktmon stop 2>&1 | Out-String | ForEach-Object { Log ("pktmon stop: " + $_.Trim()) }
+Stop-PktmonOwned -EtlPath $etl | ForEach-Object { Log ("pktmon stop: " + $_.Trim()) }
 $end = Utc
 pktmon etl2pcap $etl --out $pcap 2>&1 | Out-String | ForEach-Object { Log ("etl2pcap: " + $_.Trim()) }
 ssh -i $key -o BatchMode=yes pavel2@172.20.0.10 "pkill -f 'http.server 8080'; echo stopped" 2>&1 | Out-String | ForEach-Object { Log ("server stop: " + $_.Trim()) }

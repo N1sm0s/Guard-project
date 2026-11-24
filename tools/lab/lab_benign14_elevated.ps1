@@ -2,6 +2,8 @@
 # commands and short idle periods (successful logins, not failed attempts). Lab only. Journal before start.
 $ErrorActionPreference = "Continue"
 $root = "F:\New\integrityguard"
+. (Join-Path $PSScriptRoot 'pktmon_session.ps1')
+Assert-PktmonStopped
 $dir = Join-Path $root "outputs\lab\session"
 $key = Join-Path $env:USERPROFILE ".ssh\ig_lab"
 $progress = Join-Path $dir "benign14-run.txt"
@@ -18,8 +20,9 @@ Log ("start benign-14 " + $start)
 $etl = Join-Path $dir "benign-14.etl"
 $pcap = Join-Path $dir "benign-14.pcapng"
 Remove-Item $etl, $pcap -ErrorAction SilentlyContinue
-pktmon stop 2>&1 | Out-Null
+    Assert-PktmonStopped
 pktmon start --capture --comp all --file-name $etl 2>&1 | Out-String | ForEach-Object { Log ("pktmon start: " + $_.Trim()) }
+    Assert-PktmonOwned -EtlPath $etl
 Start-Sleep -Seconds 2
 $ok = 0
 for ($i = 1; $i -le 60; $i++) {
@@ -29,7 +32,7 @@ for ($i = 1; $i -le 60; $i++) {
 }
 Log ("sessions ok: " + $ok)
 Start-Sleep -Seconds 2
-pktmon stop 2>&1 | Out-String | ForEach-Object { Log ("pktmon stop: " + $_.Trim()) }
+Stop-PktmonOwned -EtlPath $etl | ForEach-Object { Log ("pktmon stop: " + $_.Trim()) }
 $end = Utc
 pktmon etl2pcap $etl --out $pcap 2>&1 | Out-String | ForEach-Object { Log ("etl2pcap: " + $_.Trim()) }
 Journal @{ scenario_id = "benign-14"; label = "benign"; lab_subnet = "172.20.0.0/24"; start_utc = $start; end_utc = $end;

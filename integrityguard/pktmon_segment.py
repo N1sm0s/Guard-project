@@ -87,9 +87,9 @@ def capture_segment_files(duration: int, out_dir: Path, root: Path) -> dict:
             counters = pc._run(["counters", "--json"], timeout=15)
             counter_text = (counters.stdout or "").strip() if counters.returncode == 0 else ""
         finally:
-            stop = pc._run(["stop"], timeout=30)
-        if stop.returncode != 0:
-            raise SegmentError("Не подтверждена штатная остановка захвата; сегмент отброшен")
+            stop_ok, stop_reason = pc._stop_owned_capture(etl_path)
+        if not stop_ok:
+            raise SegmentError(stop_reason or "Не подтверждена штатная остановка захвата; сегмент отброшен")
         end_at = time.time()
         if not etl_path.is_file() or etl_path.stat().st_size == 0:
             raise SegmentError("Pktmon не сохранил пакеты в этом интервале")

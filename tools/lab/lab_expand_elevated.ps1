@@ -2,6 +2,8 @@
 # and a second low-rate flood variant. Journal entry before each start, pcapng per scenario.
 $ErrorActionPreference = "Continue"
 $root = "F:\New\integrityguard"
+. (Join-Path $PSScriptRoot 'pktmon_session.ps1')
+Assert-PktmonStopped
 $dir = Join-Path $root "outputs\lab\session"
 $key = Join-Path $env:USERPROFILE ".ssh\ig_lab"
 $progress = Join-Path $dir "expand-run.txt"
@@ -41,13 +43,14 @@ foreach ($sc in $scenarios) {
     $etl = Join-Path $dir ($sc.id + ".etl")
     $pcap = Join-Path $dir ($sc.id + ".pcapng")
     Remove-Item $etl, $pcap -ErrorAction SilentlyContinue
-    pktmon stop 2>&1 | Out-Null
+    Assert-PktmonStopped
     pktmon start --capture --comp all --file-name $etl 2>&1 | Out-String | ForEach-Object { Log ("pktmon start: " + $_.Trim()) }
+    Assert-PktmonOwned -EtlPath $etl
     Start-Sleep -Seconds 2
     $run = ssh -i $key -o BatchMode=yes pavel@172.20.0.5 $sc.cmd 2>&1 | Out-String
     Log ("run: " + $run.Trim())
     Start-Sleep -Seconds 2
-    pktmon stop 2>&1 | Out-String | ForEach-Object { Log ("pktmon stop: " + $_.Trim()) }
+Stop-PktmonOwned -EtlPath $etl | ForEach-Object { Log ("pktmon stop: " + $_.Trim()) }
     $end = Utc
     pktmon etl2pcap $etl --out $pcap 2>&1 | Out-String | ForEach-Object { Log ("etl2pcap: " + $_.Trim()) }
     if ($sc.server) {

@@ -130,4 +130,4 @@ for event_id, ts, snapshot, assessment in candidates:
             skipped_count += 1
 
 print(f"\nDone. Labeled: {labeled_count} flow reviews, Skipped: {skipped_count}")
-print("Run retrain_now.py --force to retrain on the expanded dataset.")
+print("Run tools/maintenance/retrain_now.py --force to retrain on the expanded dataset.")

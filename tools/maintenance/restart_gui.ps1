@@ -57,6 +57,16 @@ if (-not $notRunning) {
     if ($activeEtl -notmatch $ownedPattern) {
         throw "Pktmon is active with a non-IntegrityGuard ETL path; refusing to stop a foreign capture."
     }
+    $ownerPath = Join-Path (Split-Path -Parent $activeEtl) 'owner.json'
+    if (-not (Test-Path -LiteralPath $ownerPath -PathType Leaf)) {
+        throw "Pktmon ETL looks like an app path but has no owner marker; refusing to stop it."
+    }
+    $owner = Get-Content -LiteralPath $ownerPath -Raw | ConvertFrom-Json
+    $ownerPid = [int]$owner.pid
+    $ownerCreated = [double]$owner.process_create_time
+    if ($ownerPid -le 0 -or $ownerCreated -le 0) {
+        throw "Pktmon owner marker is invalid; refusing to stop the session."
+    }
     $stopOwnedPktmon = $true
 }
 
@@ -85,9 +95,33 @@ if ($remaining.Count -gt 0) {
     throw "The previous IntegrityGuard process did not stop."
 }
 if ($stopOwnedPktmon) {
+    # The app shutdown/build steps can take time. Re-read both the global session
+    # path and persisted process identity immediately before the global stop.
+    $beforeStop = (& $pktmon status 2>&1 | Out-String)
+    if ($LASTEXITCODE -ne 0 -or
+        $beforeStop -match '(?i)not running|is stopped|not started|не запущен|не выполняется|остановлен|сбор не ведется|сбор не ведётся') {
+        throw "Pktmon session changed before restart; package update was aborted."
+    }
+    $beforeStopMatch = [regex]::Match($beforeStop, '(?im)([A-Z]:\\[^\r\n]*?\.etl)\s*$')
+    if (-not $beforeStopMatch.Success -or
+        [IO.Path]::GetFullPath($beforeStopMatch.Groups[1].Value.Trim()) -ne $activeEtl) {
+        throw "Active Pktmon ETL changed before restart; no session was stopped."
+    }
+    $ownerAgain = Get-Content -LiteralPath $ownerPath -Raw | ConvertFrom-Json
+    if ([int]$ownerAgain.pid -ne $ownerPid -or [double]$ownerAgain.process_create_time -ne $ownerCreated) {
+        throw "Pktmon owner marker changed before restart; no session was stopped."
+    }
+    $ownerProc = Get-CimInstance Win32_Process -Filter "ProcessId=$ownerPid" -ErrorAction SilentlyContinue
+    if ($ownerProc) {
+        $ownerProcCreated = [Management.ManagementDateTimeConverter]::ToDateTime($ownerProc.CreationDate)
+        $expectedCreated = [DateTimeOffset]::FromUnixTimeMilliseconds([long]($ownerCreated * 1000)).LocalDateTime
+        if ([Math]::Abs(($ownerProcCreated - $expectedCreated).TotalSeconds) -lt 2) {
+            throw "Pktmon owner PID $ownerPid is still alive; no session was stopped."
+        }
+    }
     & $pktmon stop | Out-Null
     if ($LASTEXITCODE -ne 0) {
-        throw "Could not stop the IntegrityGuard-owned Pktmon capture; package update was aborted."
+        throw "Could not stop the verified IntegrityGuard-owned Pktmon capture; package update was aborted."
     }
     Start-Sleep -Milliseconds 500
     $stoppedStatus = (& $pktmon status 2>&1 | Out-String)

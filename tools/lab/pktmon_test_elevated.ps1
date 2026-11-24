@@ -2,6 +2,8 @@
 # Run through "Run as administrator". Output goes to outputs\lab\pktmon-test-elevated.txt.
 $ErrorActionPreference = "Continue"
 $root = "F:\New\integrityguard"
+. (Join-Path $PSScriptRoot 'pktmon_session.ps1')
+Assert-PktmonStopped
 $out = Join-Path $root "outputs\lab\pktmon-test-elevated.txt"
 $etl = Join-Path $env:TEMP "lab-test2.etl"
 $pcap = Join-Path $env:TEMP "lab-test2.pcapng"
@@ -12,14 +14,16 @@ function Log($text) { $text | Out-File -FilePath $out -Append -Encoding utf8 }
 Remove-Item $out, $etl, $pcap -ErrorAction SilentlyContinue
 Log ("start " + (Get-Date -Format o))
 
+    Assert-PktmonStopped
 pktmon start --capture --comp 106 --comp 208 --comp 220 --file-name $etl 2>&1 | Out-String | ForEach-Object { Log ("pktmon start: " + $_) }
+    Assert-PktmonOwned -EtlPath $etl
 Start-Sleep -Seconds 2
 
 $ping = ssh -i $key -o BatchMode=yes pavel@172.20.0.5 "ping -c 10 -i 0.5 172.20.0.10 | tail -2" 2>&1 | Out-String
 Log ("ping: " + $ping)
 Start-Sleep -Seconds 2
 
-pktmon stop 2>&1 | Out-String | ForEach-Object { Log ("pktmon stop: " + $_) }
+Stop-PktmonOwned -EtlPath $etl | ForEach-Object { Log ("pktmon stop: " + $_.Trim()) }
 pktmon etl2pcap $etl --out $pcap 2>&1 | Out-String | ForEach-Object { Log ("etl2pcap: " + $_) }
 
 if (Test-Path $pcap) {

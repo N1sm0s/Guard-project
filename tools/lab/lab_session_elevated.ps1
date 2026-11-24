@@ -4,6 +4,8 @@
 # Outputs: outputs\lab\session\<scenario>.pcapng and outputs\lab\session\session-log.jsonl, progress in session.txt
 $ErrorActionPreference = "Continue"
 $root = "F:\New\integrityguard"
+. (Join-Path $PSScriptRoot 'pktmon_session.ps1')
+Assert-PktmonStopped
 $dir = Join-Path $root "outputs\lab\session"
 $key = Join-Path $env:USERPROFILE ".ssh\ig_lab"
 $progress = Join-Path $dir "session.txt"
@@ -29,13 +31,14 @@ foreach ($sc in $scenarios) {
     Log ("start " + $sc.id + " " + $start)
     $etl = Join-Path $dir ($sc.id + ".etl")
     $pcap = Join-Path $dir ($sc.id + ".pcapng")
-    pktmon stop 2>&1 | Out-Null
+    Assert-PktmonStopped
     pktmon start --capture --comp all --file-name $etl 2>&1 | Out-String | ForEach-Object { Log ("pktmon start: " + $_.Trim()) }
+    Assert-PktmonOwned -EtlPath $etl
     Start-Sleep -Seconds 2
     $run = ssh -i $key -o BatchMode=yes pavel@172.20.0.5 $sc.cmd 2>&1 | Out-String
     Log ("run: " + $run.Trim())
     Start-Sleep -Seconds 2
-    pktmon stop 2>&1 | Out-String | ForEach-Object { Log ("pktmon stop: " + $_.Trim()) }
+Stop-PktmonOwned -EtlPath $etl | ForEach-Object { Log ("pktmon stop: " + $_.Trim()) }
     $end = Utc
     pktmon etl2pcap $etl --out $pcap 2>&1 | Out-String | ForEach-Object { Log ("etl2pcap: " + $_.Trim()) }
     Journal @{ scenario_id = $sc.id; label = $sc.label; lab_subnet = "172.20.0.0/24"; start_utc = $start; end_utc = $end;

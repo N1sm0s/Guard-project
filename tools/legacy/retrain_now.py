@@ -1,10 +1,10 @@
 """
 retrain_now.py  --  быстрый перезапуск обучения классификатора.
-Использование: python retrain_now.py [--force]
+Использование: python tools/legacy/retrain_now.py [--force]
 """
 import sys, pathlib, sqlite3, json, argparse, datetime
 
-ROOT = pathlib.Path(__file__).parent
+ROOT = pathlib.Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(ROOT))
 
 parser = argparse.ArgumentParser()

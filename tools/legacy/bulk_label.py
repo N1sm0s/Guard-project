@@ -2,7 +2,7 @@
 Bulk labeling script: label all unlabeled ALLOW events at once.
 
 Usage:
-  python bulk_label.py [--limit N] [--dry-run]
+  python tools/legacy/bulk_label.py [--limit N] [--dry-run]
 """
 import sqlite3
 import json
@@ -119,7 +119,7 @@ def main():
             print(f"  {i+1}/{len(to_label)} events, {total_labeled} labels added")
 
     print(f"\nDone! Added {total_labeled} flow labels across {len(to_label)} events.")
-    print("Run: python retrain_now.py --force")
+    print("Run: python tools/legacy/retrain_now.py --force (legacy only; do not use for release)")
 
 if __name__ == "__main__":
     main()
