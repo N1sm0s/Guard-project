@@ -85,10 +85,44 @@ class ElevatedHelperTeardownTests(unittest.TestCase):
             def poll(self):
                 return None
 
-        with patch.object(seg, "_ACTIVE_HELPERS", [(FakeProcess(), None)]), \
+        with patch.object(seg, "_ACTIVE_HELPERS", [(FakeProcess(), None, 100.0, Path("helper.exe"))]), \
+                patch.object(seg, "_is_wrapper_still_ours", return_value=True), \
                 patch.object(seg.subprocess, "run", return_value=_completed()) as run:
             seg.stop_elevated_helper()
         self.assertEqual(run.call_args.args[0][:5], ["taskkill", "/T", "/F", "/PID", "4242"])
+
+    def test_refuses_to_kill_wrapper_when_pid_identity_not_confirmed(self):
+        class FakeProcess:
+            pid = 4242
+
+            def poll(self):
+                return None
+
+        with patch.object(seg, "_ACTIVE_HELPERS", [(FakeProcess(), None, 100.0, Path("helper.exe"))]), \
+                patch.object(seg, "_is_wrapper_still_ours", return_value=False), \
+                patch.object(seg.subprocess, "run") as run:
+            notes = seg.stop_elevated_helper()
+        run.assert_not_called()
+        self.assertTrue(any("не подтверждена" in note for note in notes))
+
+    def test_does_not_kill_unverified_child_pid_from_stale_file(self):
+        class FakeProcess:
+            pid = 4242
+
+            def poll(self):
+                return None
+
+        with tempfile.TemporaryDirectory() as folder:
+            pid_file = Path(folder) / "helper.pid"
+            pid_file.write_text("9999", encoding="ascii")
+            with patch.object(seg, "_ACTIVE_HELPERS", [(FakeProcess(), pid_file, 100.0, Path("helper.exe"))]), \
+                    patch.object(seg, "_is_wrapper_still_ours", return_value=True), \
+                    patch.object(seg, "_is_helper_child_ours", return_value=False), \
+                    patch.object(seg.subprocess, "run", return_value=_completed()) as run:
+                notes = seg.stop_elevated_helper()
+        pids = [call.args[0][4] for call in run.call_args_list]
+        self.assertEqual(pids, ["4242"])                 # only the wrapper, never PID 9999
+        self.assertTrue(any("9999" in note for note in notes))
 
 
 if __name__ == "__main__":

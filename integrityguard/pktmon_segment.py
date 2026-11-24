@@ -33,7 +33,7 @@ FORMAT = "integrityguard-pktmon-segment-v1"
 HELPER_PID_FILE = "helper.pid"
 
 # (wrapper Popen, pid-file path) for each UAC request this app started and has not reaped.
-_ACTIVE_HELPERS: list[tuple[subprocess.Popen, Path | None]] = []
+_ACTIVE_HELPERS: list[tuple[subprocess.Popen, Path | None, float | None, Path]] = []
 _HELPERS_LOCK = threading.Lock()
 
 
@@ -164,6 +164,11 @@ def request_elevated_capture(program: Path, script: Path | None, duration: int, 
                        for part in parts)
     # The elevated child's PID is written to a file so the app can end it on exit.
     pid_file = Path(out_dir) / HELPER_PID_FILE
+    # Remove a PID file left by an earlier run: its PID may now belong to another process.
+    try:
+        pid_file.unlink(missing_ok=True)
+    except OSError:
+        pass
     script_text = (
         "$p = Start-Process -FilePath $env:IG_FILE -Verb RunAs -PassThru -WindowStyle Hidden "
         "-ArgumentList $env:IG_ARGS; Set-Content -LiteralPath $env:IG_PIDFILE -Value $p.Id; "
@@ -174,7 +179,7 @@ def request_elevated_capture(program: Path, script: Path | None, duration: int, 
         ["powershell.exe", "-NoProfile", "-NonInteractive", "-Command", script_text],
         stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, env=env,
         creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
-    entry = (proc, pid_file)
+    entry = (proc, pid_file, _process_create_time(proc.pid), Path(program))
     with _HELPERS_LOCK:
         _ACTIVE_HELPERS.append(entry)
     try:
@@ -201,20 +206,64 @@ def _kill_tree(pid: int) -> tuple[bool, str]:
     return False, f"taskkill для PID {pid} не выполнен (код {done.returncode})"
 
 
+def _process_create_time(pid) -> float | None:
+    """Creation time of a live process, or None when it cannot be read."""
+    try:
+        import psutil
+        return float(psutil.Process(int(pid)).create_time())
+    except Exception:  # noqa: BLE001 — gone, access denied, or psutil missing: treat as unknown
+        return None
+
+
+def _is_wrapper_still_ours(pid, created) -> bool:
+    """True only when PID still names the same PowerShell wrapper we started (PID reuse guard)."""
+    if created is None:
+        return False
+    try:
+        import psutil
+        proc = psutil.Process(int(pid))
+        return abs(float(proc.create_time()) - created) < 1.0 and proc.name().lower() == "powershell.exe"
+    except Exception:  # noqa: BLE001
+        return False
+
+
+def _is_helper_child_ours(child_pid, program: Path, wrapper_created) -> bool:
+    """True only when child_pid is a process running our helper program, started after our wrapper.
+
+    An elevated child usually cannot be inspected by a non-elevated app; then it is not
+    verified and is not killed. Killing an unverified PID could end an unrelated process.
+    """
+    if wrapper_created is None:
+        return False
+    try:
+        import psutil
+        proc = psutil.Process(int(child_pid))
+        exe = proc.exe()
+        created = float(proc.create_time())
+    except Exception:  # noqa: BLE001 — gone, access denied (elevated), or psutil missing
+        return False
+    if not exe or os.path.normcase(os.path.abspath(exe)) != os.path.normcase(os.path.abspath(str(program))):
+        return False
+    return created >= wrapper_created - 1.0
+
+
 def stop_elevated_helper() -> list[str]:
     """End the UAC wrapper and the elevated helper started by this app. Returns notes for failures.
 
-    The elevated child normally cannot be killed by a non-elevated app (access denied);
-    it is then reported, and its own 30 s capture bound and the owner-marker recovery
-    path are the remaining safety net.
+    Each PID is killed only after it is verified to be the process this app started (PID reuse
+    guard): the wrapper by its creation time, the elevated child by its executable path and
+    start time. An unverified PID is reported and left alone.
     """
     with _HELPERS_LOCK:
         entries = list(_ACTIVE_HELPERS)
         _ACTIVE_HELPERS.clear()
     notes: list[str] = []
-    for proc, pid_file in entries:
+    for proc, pid_file, wrapper_created, program in entries:
         if proc.poll() is not None:
             continue                      # already finished: its PIDs may be reused, do not touch them
+        if not _is_wrapper_still_ours(proc.pid, wrapper_created):
+            notes.append(f"обёртка UAC (PID {proc.pid}) не подтверждена; не завершена")
+            continue
         ok, note = _kill_tree(proc.pid)
         if not ok:
             notes.append(note)
@@ -222,6 +271,9 @@ def stop_elevated_helper() -> list[str]:
             try:
                 child_pid = int(pid_file.read_text(encoding="ascii").strip())
             except (OSError, ValueError):
+                continue
+            if not _is_helper_child_ours(child_pid, program, wrapper_created):
+                notes.append(f"элевированный помощник (PID {child_pid}) не подтверждён; не завершён")
                 continue
             ok, note = _kill_tree(child_pid)
             if not ok:
